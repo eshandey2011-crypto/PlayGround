@@ -1,0 +1,11 @@
+{
+  "name": "Shadow Warrior: Rise of the Legend",
+  "short_name": "ShadowWarrior",
+  "description": "3D open-world action RPG — playable on Android phones and tablets.",
+  "start_url": "./index.html",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#0a0e1a",
+  "theme_color": "#0a0e1a",
+  "icons": []
+}

@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0a0e1a">
+<title>Shadow Warrior: Rise of the Legend</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚔</text></svg>">
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="css/game.css">
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.js" } }
+</script>
+</head>
+<body>
+<div id="game-root">
+  <canvas id="game-canvas"></canvas>
+
+  <!-- Loading -->
+  <div id="loading-screen" class="screen">
+    <div class="load-box">
+      <h1>SHADOW WARRIOR</h1>
+      <h2>Rise of the Legend</h2>
+      <div class="load-bar"><div id="load-fill"></div></div>
+      <p id="load-text">Forging the realm...</p>
+    </div>
+  </div>
+
+  <!-- Main menu -->
+  <div id="main-menu" class="screen hidden">
+    <div class="menu-bg"></div>
+    <div class="menu-panel">
+      <h1>SHADOW WARRIOR</h1>
+      <h2>RISE OF THE LEGEND</h2>
+      <p class="tagline">An open-world action RPG &bull; Phone &amp; Tablet ready</p>
+      <div class="menu-btns">
+        <button id="btn-new" class="mbtn primary">⚔ New Journey</button>
+        <button id="btn-continue" class="mbtn">📜 Continue</button>
+        <button id="btn-help" class="mbtn">❔ How to Play</button>
+      </div>
+      <div class="menu-row">
+        <label>Difficulty
+          <select id="sel-difficulty">
+            <option value="story">Story — relaxed</option>
+            <option value="normal" selected>Normal — balanced</option>
+            <option value="hard">Hard — brutal</option>
+          </select>
+        </label>
+        <label>Graphics
+          <select id="sel-graphics">
+            <option value="low">Low</option>
+            <option value="medium" selected>Medium</option>
+            <option value="high">High</option>
+            <option value="ultra">Ultra</option>
+          </select>
+        </label>
+      </div>
+      <p class="hint">Best on Chrome for Android &bull; Installs as an app (PWA)</p>
+    </div>
+    <div id="help-panel" class="help hidden">
+      <h3>How to Play</h3>
+      <ul>
+        <li><b>Move:</b> WASD / left virtual joystick &bull; <b>Sprint:</b> Shift</li>
+        <li><b>Camera:</b> mouse drag / drag right side of screen</li>
+        <li><b>Attack:</b> J / ⚔ &bull; <b>Heavy:</b> K / 🗡 &bull; <b>Block:</b> hold L / 🛡</li>
+        <li><b>Dodge:</b> Space / 💨 &bull; <b>Jump:</b> F / ⬆ &bull; <b>Specials:</b> 1 / 2</li>
+        <li><b>Interact:</b> E / 👁 button &bull; <b>Lock-on:</b> Tab / 🎯 &bull; <b>Inventory:</b> I &bull; <b>Pause:</b> Esc</li>
+        <li>Follow the golden beacon. Talk to villagers (!). Clear camps, find the Temple Key, defeat the Shadow Warlord.</li>
+      </ul>
+      <button id="btn-help-close" class="mbtn">Close</button>
+    </div>
+  </div>
+
+  <!-- HUD -->
+  <div id="hud" class="hidden">
+    <div id="vitals">
+      <div class="bar hp"><div id="hp-fill"></div><span id="hp-text"></span></div>
+      <div class="bar st"><div id="st-fill"></div></div>
+      <div class="bar en"><div id="en-fill"></div></div>
+      <div id="level-badge">Lv <span id="level-num">1</span></div>
+      <div id="xp-mini"><div id="xp-fill"></div></div>
+    </div>
+    <div id="quest-tracker"><h4 id="qt-title">Quest</h4><p id="qt-obj">...</p><p id="qt-dist"></p></div>
+    <canvas id="minimap" width="168" height="168"></canvas>
+    <div id="clock-weather"><span id="clock">☀ 08:00</span><span id="weather-ico">🌤</span></div>
+    <div id="boss-bar" class="hidden"><span id="boss-name">Shadow Warlord</span><div class="bar boss"><div id="boss-fill"></div></div></div>
+    <div id="combo-pop" class="hidden"></div>
+    <div id="interact-prompt" class="hidden"><span id="interact-key">E</span> <span id="interact-text">Talk</span></div>
+    <div id="toast-wrap"></div>
+    <div id="dmgnums"></div>
+    <div id="boss-warn" class="hidden">⚠ THE SHADOW WARLORD AWAKENS ⚠</div>
+  </div>
+
+  <!-- Touch controls -->
+  <div id="touch-ui" class="hidden">
+    <div id="joystick"><div id="stick"></div></div>
+    <div id="touch-btns">
+      <button class="tbtn small" id="tb-lock" title="Lock-on">🎯</button>
+      <button class="tbtn small" id="tb-interact" title="Interact">👁</button>
+      <button class="tbtn small" id="tb-jump" title="Jump">⬆</button>
+      <button class="tbtn" id="tb-dodge" title="Dodge">💨</button>
+      <button class="tbtn" id="tb-block" title="Block">🛡</button>
+      <button class="tbtn atk" id="tb-atk" title="Attack">⚔</button>
+      <button class="tbtn hvy" id="tb-hvy" title="Heavy">🗡</button>
+      <button class="tbtn sp" id="tb-s1" title="Skill 1">✦</button>
+      <button class="tbtn sp" id="tb-s2" title="Skill 2">❖</button>
+    </div>
+  </div>
+
+  <!-- Dialogue -->
+  <div id="dialogue" class="hidden">
+    <div class="dlg-box">
+      <h3 id="dlg-name">Elder</h3>
+      <p id="dlg-text">...</p>
+      <div id="dlg-opts"></div>
+      <button id="dlg-next" class="mbtn primary">Continue ▸</button>
+    </div>
+  </div>
+
+  <!-- Panels: inventory / skills / map-quest / settings / pause / death / victory -->
+  <div id="panel" class="hidden"><div class="panel-box">
+    <div class="panel-tabs">
+      <button data-tab="inv" class="ptab active">🎒 Inventory</button>
+      <button data-tab="skills" class="ptab">✦ Skills</button>
+      <button data-tab="quests" class="ptab">📜 Quests</button>
+      <button data-tab="stats" class="ptab">📊 Stats</button>
+      <button data-tab="settings" class="ptab">⚙ Settings</button>
+      <button id="panel-close" class="ptab close">✕</button>
+    </div>
+    <div id="tab-inv" class="tabpage"></div>
+    <div id="tab-skills" class="tabpage hidden"></div>
+    <div id="tab-quests" class="tabpage hidden"></div>
+    <div id="tab-stats" class="tabpage hidden"></div>
+    <div id="tab-settings" class="tabpage hidden"></div>
+  </div></div>
+
+  <div id="pause-menu" class="screen hidden"><div class="menu-panel small">
+    <h2>Paused</h2>
+    <button id="btn-resume" class="mbtn primary">Resume</button>
+    <button id="btn-open-panel" class="mbtn">Inventory / Skills / Settings</button>
+    <button id="btn-save" class="mbtn">💾 Save Game</button>
+    <button id="btn-quit" class="mbtn">Quit to Title</button>
+  </div></div>
+
+  <div id="death-screen" class="screen hidden"><div class="menu-panel small">
+    <h2 class="red">YOU HAVE FALLEN</h2>
+    <p id="death-info">The shadow claims another warrior...</p>
+    <button id="btn-respawn" class="mbtn primary">Rise Again (Checkpoint)</button>
+    <button id="btn-load-death" class="mbtn">Load Last Save</button>
+  </div></div>
+
+  <div id="victory-screen" class="screen hidden"><div class="menu-panel small">
+    <h2 class="gold">👑 LEGEND RISES 👑</h2>
+    <p id="victory-info"></p>
+    <button id="btn-victory-free" class="mbtn primary">Keep Exploring</button>
+    <button id="btn-victory-title" class="mbtn">Back to Title</button>
+  </div></div>
+
+  <div id="vignette"></div>
+  <div id="fader"></div>
+</div>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
