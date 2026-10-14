@@ -254,17 +254,27 @@ object LocalMediaScanner {
                 null
             }
             if (bitmap == null) {
+                var retriever: android.media.MediaMetadataRetriever? = null
                 try {
-                    val retriever = android.media.MediaMetadataRetriever()
+                    val uri = Uri.parse(uriString)
+                    retriever = android.media.MediaMetadataRetriever()
                     if (uriString.startsWith("content://") || uriString.startsWith("file://")) {
                         retriever.setDataSource(context, uri)
                     } else if (uriString.startsWith("http://") || uriString.startsWith("https://")) {
                         retriever.setDataSource(uriString, HashMap<String, String>())
+                    } else {
+                        // Plain path / unsupported scheme: skip retriever entirely.
+                        try { retriever.release() } catch (_: Exception) {}
+                        retriever = null
                     }
-                    bitmap = retriever.getFrameAtTime(1_000_000, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                        ?: retriever.frameAtTime
-                    retriever.release()
-                } catch (_: Exception) {}
+                    if (retriever != null) {
+                        bitmap = retriever.getFrameAtTime(1_000_000, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                            ?: retriever.frameAtTime
+                    }
+                } catch (_: Exception) {
+                } finally {
+                    try { retriever?.release() } catch (_: Exception) {}
+                }
             }
             if (bitmap != null) {
                 thumbnailCache[uriString] = bitmap

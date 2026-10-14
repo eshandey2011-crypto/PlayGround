@@ -327,16 +327,21 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         val activeIndex = if (activeCue != null) parsed.indexOf(activeCue) else -1
         val upcomingIndex = if (upcomingCue != null) parsed.indexOf(upcomingCue) else -1
 
+        // Voice gate checked BEFORE marking spoken: a muted/paused cue must not
+        // be recorded as spoken, otherwise it is skipped forever on unmute.
+        val canSpeakNow = state.isOfflineSubtitleMode && state.isVideoPlaying &&
+            !state.isDubbingMuted && !state.isMasterMuted && state.isAutoDubbingEnabled
+
         _uiState.update {
             it.copy(
                 videoPositionMs = positionMs,
                 activeSubtitle = activeCue,
-                lastSpokenSubtitleIndex = if (upcomingCue != null) upcomingIndex else it.lastSpokenSubtitleIndex
+                lastSpokenSubtitleIndex = if (upcomingCue != null && canSpeakNow) upcomingIndex else it.lastSpokenSubtitleIndex
             )
         }
 
         // Offline Subtitle Reader voice delivery (fires on the lead window).
-        if (state.isOfflineSubtitleMode && state.isVideoPlaying && upcomingCue != null && upcomingIndex != state.lastSpokenSubtitleIndex) {
+        if (canSpeakNow && upcomingCue != null && upcomingIndex != state.lastSpokenSubtitleIndex) {
             speakSubtitleCue(upcomingCue)
         }
     }
@@ -695,6 +700,13 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         _uiState.update { it.copy(isVideoPlaying = !it.isVideoPlaying) }
     }
 
+    /** Background/lifecycle pause: stops playback clock + speech, keeps position. */
+    fun pausePlayback() {
+        if (!_uiState.value.isVideoPlaying) return
+        stopSpeaking()
+        _uiState.update { it.copy(isVideoPlaying = false) }
+    }
+
     fun seekTo(positionMs: Long) {
         val clamped = positionMs.coerceIn(0L, _uiState.value.videoDurationMs.coerceAtLeast(1000L))
         // pendingSeekMs bridges Compose state -> ExoPlayer.seekTo() in the surface view.
@@ -702,8 +714,14 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         updateVideoPosition(clamped)
     }
 
-    fun consumePendingSeek() {
-        _uiState.update { it.copy(pendingSeekMs = null) }
+    /**
+     * Clears the seek bridge ONLY if it still holds the request we served.
+     * A newer seekTo() issued mid-flight must survive (lost-seek fix).
+     */
+    fun consumePendingSeek(servedMs: Long) {
+        _uiState.update { st ->
+            if (st.pendingSeekMs == servedMs) st.copy(pendingSeekMs = null) else st
+        }
     }
 
     /**
@@ -1001,12 +1019,17 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
     }
 
     fun selectDeviceVideo(video: MxVideoItem) {
+        // Stop previous video's speech + drop in-flight seeks so the old
+        // subtitle voice never bleeds into the new video.
+        stopSpeaking()
+        speechSynthesisJob?.cancel()
         _uiState.update {
             it.copy(
                 videoUri = video.uriString,
                 videoTitle = video.title,
                 videoDurationMs = video.durationMs.coerceAtLeast(1000L),
                 videoPositionMs = 0L,
+                pendingSeekMs = null,
                 activeSubtitle = null,
                 lastSpokenSubtitleIndex = -1,
                 isVideoPlaying = true,
@@ -1391,14 +1414,23 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                 )
                 attachTtsListener()
                 if (result.success) {
+                    // Surface dub-missing plainly: success with original sound
+                    // only must never look identical to a dubbed export.
+                    val dubWarning = if (!result.dubbedAudioIncluded) {
+                        "Dubbed voice missing — video has original sound only. " +
+                            "Check TTS voice data, then export again."
+                    } else {
+                        null
+                    }
                     _uiState.update {
                         it.copy(
                             isExportingVideo = false,
                             videoExportProgress = 1f,
-                            videoExportStatus = "Export complete!",
+                            videoExportStatus = if (dubWarning == null) "Export complete!"
+                            else "Exported without dubbed voice",
                             exportedVideoFilePath = result.outputVideoFile?.absolutePath,
                             exportedSrtFilePath = result.outputSrtFile?.absolutePath,
-                            videoExportError = null
+                            videoExportError = dubWarning
                         )
                     }
                 } else {

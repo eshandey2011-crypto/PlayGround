@@ -16,6 +16,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -116,18 +117,30 @@ fun VideoExportDialog(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 } else if (uiState.videoExportError != null) {
+                    // Warning (dub missing but file exists) vs hard failure:
+                    // warning still offers Share; failure only offers retry.
+                    val isWarning = uiState.exportedVideoFilePath != null
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
-                            imageVector = Icons.Default.Error,
+                            imageVector = if (isWarning) Icons.Default.Warning else Icons.Default.Error,
                             contentDescription = null,
-                            tint = MaterialTheme.colorScheme.error,
+                            tint = if (isWarning) androidx.compose.ui.graphics.Color(0xFFF59E0B)
+                            else MaterialTheme.colorScheme.error,
                             modifier = Modifier.size(20.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
                             text = uiState.videoExportError ?: "",
                             fontSize = 13.sp,
-                            color = MaterialTheme.colorScheme.error
+                            color = if (isWarning) MaterialTheme.colorScheme.onSurface
+                            else MaterialTheme.colorScheme.error
+                        )
+                    }
+                    if (isWarning) {
+                        Text(
+                            text = "MP4: ${uiState.exportedVideoFilePath}",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 } else if (uiState.exportedVideoFilePath != null) {
@@ -182,7 +195,9 @@ fun VideoExportDialog(
                     ) {
                         Text("Cancel", fontWeight = FontWeight.Bold)
                     }
-                } else if (uiState.exportedVideoFilePath != null && uiState.videoExportError == null) {
+                } else if (uiState.exportedVideoFilePath != null) {
+                    // Full success AND dub-missing warning both land here:
+                    // a playable file exists, so Share stays available.
                     Button(
                         onClick = onShareVideo,
                         colors = ButtonDefaults.buttonColors(containerColor = MxBluePrimary),
@@ -197,6 +212,7 @@ fun VideoExportDialog(
                         Text("Close")
                     }
                 } else {
+                    // Idle state AND hard failure (no file): (re)try export.
                     Button(
                         onClick = onStartExport,
                         colors = ButtonDefaults.buttonColors(containerColor = MxBluePrimary),

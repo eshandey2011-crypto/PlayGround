@@ -376,7 +376,12 @@ data class VideoExportResult(
     val outputAssFile: File? = null,
     val durationMs: Long = 0L,
     val fileSizeBytes: Long = 0L,
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    /**
+     * True only when the dubbed voice track was actually synthesized and muxed.
+     * False means the output is a plain copy of the source video (no dub).
+     */
+    val dubbedAudioIncluded: Boolean = false
 )
 
 object VideoExportManager {
@@ -477,15 +482,24 @@ object VideoExportManager {
                 }
             )
 
+            // dubbedAudioIncluded distinguishes a real dubbed mux from a plain
+            // source copy (remux failure path below) — no more silent "success".
+            // NOTE: capture before the temp dubbed file is deleted below.
+            val hadDubbedAudio = dubbedAudioFile != null &&
+                dubbedAudioFile.exists() && dubbedAudioFile.length() > 200L
+            var dubbedAudioIncluded = false
+            var usedFallbackCopy = false
             if (remuxSuccess && tempRemuxFile.exists() && tempRemuxFile.length() > 0L) {
                 tempRemuxFile.copyTo(videoOutputFile, overwrite = true)
                 try { tempRemuxFile.delete() } catch (_: Exception) {}
+                dubbedAudioIncluded = hadDubbedAudio
             } else {
                 try {
                     if (tempRemuxFile.exists()) tempRemuxFile.delete()
                     if (videoOutputFile.exists()) videoOutputFile.delete()
                 } catch (_: Exception) {}
                 sourceVideoFile.copyTo(videoOutputFile, overwrite = true)
+                usedFallbackCopy = true
             }
             try { dubbedAudioFile?.delete() } catch (_: Exception) {}
 
@@ -498,14 +512,23 @@ object VideoExportManager {
             )
 
             val fileSizeBytes = videoOutputFile.length()
-            onProgress(1.0f, "Video export complete with $targetLanguageLabel subtitle voice!")
+            val wantsDub = config.includeHindiDubbing && exportCues.isNotEmpty()
+            val fallbackWarning = if (usedFallbackCopy) {
+                " (note: audio mux failed — video saved without dubbed voice)"
+            } else if (wantsDub && !dubbedAudioIncluded) {
+                " (note: voice synthesis produced no audio — video has original sound only)"
+            } else {
+                ""
+            }
+            onProgress(1.0f, "Video export complete$fallbackWarning")
             VideoExportResult(
                 success = true,
                 outputVideoFile = videoOutputFile,
                 outputSrtFile = srtOutputFile,
                 outputAssFile = assOutputFile,
                 durationMs = durationMs,
-                fileSizeBytes = fileSizeBytes
+                fileSizeBytes = fileSizeBytes,
+                dubbedAudioIncluded = dubbedAudioIncluded && !usedFallbackCopy
             )
         } catch (e: Exception) {
             Log.e(TAG, "Video export failed", e)
@@ -532,27 +555,30 @@ object VideoExportManager {
                     return cachedFile
                 }
                 val request = Request.Builder().url(uriString).build()
-                val response = httpClient.newCall(request).execute()
-                if (!response.isSuccessful) {
-                    throw IllegalStateException("HTTP error downloading video: ${response.code}")
-                }
-                val body = response.body ?: throw IllegalStateException("Empty response body from video URL")
-                val totalLength = body.contentLength()
-                val inputStream: InputStream = body.byteStream()
-                val outputStream = FileOutputStream(cachedFile)
-                val buffer = ByteArray(32 * 1024)
-                var bytesRead: Int
-                var totalBytesRead = 0L
-                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                    outputStream.write(buffer, 0, bytesRead)
-                    totalBytesRead += bytesRead
-                    if (totalLength > 0) {
-                        onDownloadProgress((totalBytesRead.toFloat() / totalLength).coerceIn(0f, 1f))
+                // response.use{} guarantees Response + ResponseBody are closed
+                // on success, HTTP errors, and copy-loop exceptions (fd leak fix).
+                httpClient.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        throw IllegalStateException("HTTP error downloading video: ${response.code}")
+                    }
+                    val body = response.body ?: throw IllegalStateException("Empty response body from video URL")
+                    val totalLength = body.contentLength()
+                    body.byteStream().use { inputStream ->
+                        FileOutputStream(cachedFile).use { outputStream ->
+                            val buffer = ByteArray(32 * 1024)
+                            var bytesRead: Int
+                            var totalBytesRead = 0L
+                            while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                                outputStream.write(buffer, 0, bytesRead)
+                                totalBytesRead += bytesRead
+                                if (totalLength > 0) {
+                                    onDownloadProgress((totalBytesRead.toFloat() / totalLength).coerceIn(0f, 1f))
+                                }
+                            }
+                            outputStream.flush()
+                        }
                     }
                 }
-                outputStream.flush()
-                outputStream.close()
-                inputStream.close()
                 cachedFile
             }
             uriString.startsWith("content://") -> {
@@ -668,25 +694,34 @@ object VideoExportManager {
             }
 
             if (audioMuxerTrackIndex < 0) {
+                // The dubbed extractor (if opened) has no usable track:
+                // release it before falling back, otherwise it leaks.
+                try { audioExtractor?.release() } catch (_: Exception) {}
+                audioExtractor = null
+                var srcAudioExt: MediaExtractor? = null
                 try {
-                    val srcAudioExt = MediaExtractor()
-                    srcAudioExt.setDataSource(sourceVideo.absolutePath)
-                    for (i in 0 until srcAudioExt.trackCount) {
-                        val format = srcAudioExt.getTrackFormat(i)
+                    // Non-null val for smart-cast stability (srcAudioExt is
+                    // reassigned to null on adopt, so it can't smart-cast).
+                    val fresh = MediaExtractor()
+                    srcAudioExt = fresh
+                    fresh.setDataSource(sourceVideo.absolutePath)
+                    for (i in 0 until fresh.trackCount) {
+                        val format = fresh.getTrackFormat(i)
                         val mime = format.getString(MediaFormat.KEY_MIME) ?: ""
                         if (mime.startsWith("audio/")) {
                             audioTrackIndex = i
-                            srcAudioExt.selectTrack(i)
+                            fresh.selectTrack(i)
                             audioMuxerTrackIndex = muxer.addTrack(format)
-                            audioExtractor = srcAudioExt
+                            audioExtractor = fresh
+                            srcAudioExt = null
                             break
                         }
                     }
-                    if (audioExtractor == null) {
-                        try { srcAudioExt.release() } catch (_: Exception) {}
-                    }
                 } catch (e: Exception) {
                     Log.w(TAG, "Could not open source video audio track: ${e.message}")
+                } finally {
+                    // Released unless adopted as the active extractor.
+                    try { srcAudioExt?.release() } catch (_: Exception) {}
                 }
             }
 
@@ -955,9 +990,12 @@ object VideoExportManager {
             val totalFrames = ((finalDurationMs * targetSampleRate) / 1000L).toInt()
 
             val fullPcmFile = File(synthDir, "full_mixed_timeline_${System.currentTimeMillis()}.pcm")
-            val outputStream = FileOutputStream(fullPcmFile).buffered(64 * 1024)
+            // use{} guarantees the stream is closed even if the mix loop throws
+            // (fd leak + partial-file fix); cleanup of the partial file below.
+            try {
+                FileOutputStream(fullPcmFile).buffered(64 * 1024).use { outputStream ->
 
-            val voiceTracks = cueSegments.map { seg ->
+                    val voiceTracks = cueSegments.map { seg ->
                 val startFrame = (seg.startMs * targetSampleRate) / 1000L
                 val totalSegFrames = seg.pcm.size / 4
                 ActiveVoiceTrack(
@@ -1055,11 +1093,15 @@ object VideoExportManager {
                 }
             }
 
-            if (currentChunkOffset > 0) {
-                outputStream.write(chunkBuffer, 0, currentChunkOffset)
+                if (currentChunkOffset > 0) {
+                    outputStream.write(chunkBuffer, 0, currentChunkOffset)
+                }
+                outputStream.flush()
             }
-            outputStream.flush()
-            outputStream.close()
+            } catch (e: Exception) {
+                try { fullPcmFile.delete() } catch (_: Exception) {}
+                throw e
+            }
 
             onProgress(0.88f, "Encoding mixed tune & voice audio track to AAC (Stereo)...")
             val outputM4a = File(synthDir, "mixed_tune_voice_${System.currentTimeMillis()}.m4a")

@@ -252,8 +252,12 @@ fun MxVideoPlayerScreen(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .clickable {
+                                                // seekTo() auto-speaks via the lead window while
+                                                // playing; explicit speak only when paused (preview).
                                                 ttsViewModel.seekTo(cue.startTimeMs)
-                                                ttsViewModel.speakSubtitleCue(cue)
+                                                if (!uiState.isVideoPlaying) {
+                                                    ttsViewModel.speakSubtitleCue(cue)
+                                                }
                                             }
                                     ) {
                                         Row(
@@ -880,12 +884,22 @@ fun MxPlayerSurfaceBox(
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold
                         )
+                        // Drag-local fraction: avoids seek storm (per-pixel seekTo)
+                        // and thumb fighting the 200ms playback clock. Real seek
+                        // fires once on release via onValueChangeFinished.
+                        var scrubFrac by remember { mutableStateOf<Float?>(null) }
+                        val clockFrac = if (uiState.videoDurationMs > 0) {
+                            (uiState.videoPositionMs.toFloat() / uiState.videoDurationMs).coerceIn(0f, 1f)
+                        } else 0f
                         Slider(
-                            value = if (uiState.videoDurationMs > 0) {
-                                (uiState.videoPositionMs.toFloat() / uiState.videoDurationMs).coerceIn(0f, 1f)
-                            } else 0f,
-                            onValueChange = { frac ->
-                                ttsViewModel.seekTo((frac * uiState.videoDurationMs).toLong())
+                            value = scrubFrac ?: clockFrac,
+                            onValueChange = { frac -> scrubFrac = frac },
+                            onValueChangeFinished = {
+                                val frac = scrubFrac
+                                scrubFrac = null
+                                if (frac != null) {
+                                    ttsViewModel.seekTo((frac * uiState.videoDurationMs).toLong())
+                                }
                             },
                             modifier = Modifier
                                 .weight(1f)
@@ -1039,13 +1053,15 @@ fun ExoPlayerSurfaceView(
     }
 
     // Bridge Compose seek requests (slider / gestures / cue taps) to ExoPlayer.
+    // consumePendingSeek(expected) only clears the exact request we served,
+    // so a newer seek issued mid-flight is never wiped (lost-seek fix).
     LaunchedEffect(uiState.pendingSeekMs) {
         val target = uiState.pendingSeekMs ?: return@LaunchedEffect
         try {
             exoPlayer.seekTo(target)
         } catch (_: Exception) {
         }
-        ttsViewModel.consumePendingSeek()
+        ttsViewModel.consumePendingSeek(target)
     }
 
     // Adopt the real player clock: fixes drift between the simulated
@@ -1111,6 +1127,11 @@ fun ExoPlayerSurfaceView(
             }
         },
         update = { view ->
+            // Decoder switch rebuilds the player: re-attach, otherwise the
+            // PlayerView keeps showing the released (black/frozen) player.
+            if (view.player !== exoPlayer) {
+                view.player = exoPlayer
+            }
             view.resizeMode = when (uiState.aspectRatioMode) {
                 AspectRatioMode.FIT -> AspectRatioFrameLayout.RESIZE_MODE_FIT
                 AspectRatioMode.FILL -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM

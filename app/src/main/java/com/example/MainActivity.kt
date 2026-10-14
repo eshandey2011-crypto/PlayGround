@@ -38,6 +38,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.core.view.WindowCompat
@@ -51,6 +54,13 @@ import com.example.ui.theme.MxBlueSecondary
 import com.example.ui.theme.MyApplicationTheme
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+/** Max subtitle file accepted by the picker (OOM/freeze guard). */
+private const val MAX_SRT_BYTES = 5L * 1024L * 1024L
+private const val MAX_SRT_CHARS = 2_000_000
 
 class MainActivity : ComponentActivity() {
 
@@ -147,6 +157,20 @@ fun MainAppScreen(
 
     var showMenuDropdown by remember { mutableStateOf(false) }
     var selectedVideoForInfo by remember { mutableStateOf<MxVideoItem?>(null) }
+    val ioScope = rememberCoroutineScope()
+
+    // Pause playback when app goes to background: prevents background audio
+    // and releases the KEEP_SCREEN_ON hold (battery fix).
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_PAUSE) {
+                ttsViewModel.pausePlayback()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     // Media permission launcher
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -159,20 +183,66 @@ fun MainAppScreen(
     }
 
     // Subtitle File Picker (.srt, .vtt, .txt, .ass)
+    // Size-guarded (5 MB) + read off the UI thread: huge files previously
+    // froze the app or OOM-crashed via unbounded readText().
     val srtPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
-        uri?.let {
-            try {
-                context.contentResolver.openInputStream(it)?.use { stream ->
-                    val reader = BufferedReader(InputStreamReader(stream))
-                    val content = reader.readText()
-                    val fileName = it.lastPathSegment ?: "imported.srt"
+        uri?.let { picked ->
+            ioScope.launch {
+                try {
+                    val sizeBytes = try {
+                        context.contentResolver.query(
+                            picked, arrayOf(android.provider.OpenableColumns.SIZE),
+                            null, null, null
+                        )?.use { cursor ->
+                            if (cursor.moveToFirst()) cursor.getLong(0) else -1L
+                        } ?: -1L
+                    } catch (_: Exception) {
+                        -1L
+                    }
+                    if (sizeBytes > MAX_SRT_BYTES) {
+                        withContext(Dispatchers.Main) {
+                            Toast.makeText(
+                                context,
+                                "Subtitle file too large (max 5 MB)",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                        return@launch
+                    }
+                    val content = withContext(Dispatchers.IO) {
+                        context.contentResolver.openInputStream(picked)?.use { stream ->
+                            val reader = BufferedReader(InputStreamReader(stream))
+                            val sb = StringBuilder()
+                            val buf = CharArray(8192)
+                            var total = 0
+                            while (true) {
+                                val n = reader.read(buf)
+                                if (n < 0) break
+                                total += n
+                                if (total > MAX_SRT_CHARS) break
+                                sb.append(buf, 0, n)
+                            }
+                            sb.toString()
+                        }
+                    }
+                    if (content.isNullOrBlank()) {
+                        withContext(Dispatchers.Main) {
+                            Toast.makeText(context, "Empty subtitle file", Toast.LENGTH_SHORT).show()
+                        }
+                        return@launch
+                    }
+                    val fileName = picked.lastPathSegment ?: "imported.srt"
                     ttsViewModel.loadSrtText(content, fileName)
-                    Toast.makeText(context, "Loaded Subtitle: $fileName", Toast.LENGTH_SHORT).show()
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "Loaded Subtitle: $fileName", Toast.LENGTH_SHORT).show()
+                    }
+                } catch (e: Exception) {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "Failed to read subtitle: ${e.message}", Toast.LENGTH_SHORT).show()
+                    }
                 }
-            } catch (e: Exception) {
-                Toast.makeText(context, "Failed to read subtitle: ${e.message}", Toast.LENGTH_SHORT).show()
             }
         }
     }

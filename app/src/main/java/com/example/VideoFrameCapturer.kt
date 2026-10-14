@@ -62,8 +62,9 @@ object VideoFrameCapturer {
             return@withContext fromTexture
         }
         if (!videoUri.isNullOrBlank()) {
+            var retriever: MediaMetadataRetriever? = null
             try {
-                val retriever = MediaMetadataRetriever()
+                retriever = MediaMetadataRetriever()
                 val parsedUri = Uri.parse(videoUri)
                 if (videoUri.startsWith("http://") || videoUri.startsWith("https://")) {
                     retriever.setDataSource(videoUri, HashMap<String, String>())
@@ -74,10 +75,11 @@ object VideoFrameCapturer {
                 val frame = retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST)
                     ?: retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                     ?: retriever.frameAtTime
-                retriever.release()
                 return@withContext frame
             } catch (e: Exception) {
                 e.printStackTrace()
+            } finally {
+                try { retriever?.release() } catch (_: Exception) {}
             }
         }
         null
