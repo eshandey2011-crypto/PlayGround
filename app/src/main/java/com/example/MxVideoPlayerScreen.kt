@@ -1039,13 +1039,14 @@ fun ExoPlayerSurfaceView(
     }
 
     // Bridge Compose seek requests (slider / gestures / cue taps) to ExoPlayer.
+    // Only consumed on success so a failed seek is retried, not dropped.
     LaunchedEffect(uiState.pendingSeekMs) {
         val target = uiState.pendingSeekMs ?: return@LaunchedEffect
         try {
             exoPlayer.seekTo(target)
+            ttsViewModel.consumePendingSeek()
         } catch (_: Exception) {
         }
-        ttsViewModel.consumePendingSeek()
     }
 
     // Adopt the real player clock: fixes drift between the simulated
@@ -1111,6 +1112,11 @@ fun ExoPlayerSurfaceView(
             }
         },
         update = { view ->
+            // Re-attach after decoder-mode rebuild: the old player was released,
+            // so the view must point at the new instance (else black video).
+            if (view.player !== exoPlayer) {
+                view.player = exoPlayer
+            }
             view.resizeMode = when (uiState.aspectRatioMode) {
                 AspectRatioMode.FIT -> AspectRatioFrameLayout.RESIZE_MODE_FIT
                 AspectRatioMode.FILL -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM

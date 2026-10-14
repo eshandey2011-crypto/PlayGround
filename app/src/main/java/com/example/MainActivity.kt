@@ -158,12 +158,21 @@ fun MainAppScreen(
         }
     }
 
-    // Subtitle File Picker (.srt, .vtt, .txt, .ass)
+    // Subtitle File Picker (.srt, .vtt, .txt, .ass).
+    // OpenDocument (not GetContent) so the URI grant is persistable and the
+    // picked subtitle survives process death / reboot.
     val srtPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
+        contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         uri?.let {
             try {
+                try {
+                    context.contentResolver.takePersistableUriPermission(
+                        it,
+                        android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                } catch (_: Exception) {
+                }
                 context.contentResolver.openInputStream(it)?.use { stream ->
                     val reader = BufferedReader(InputStreamReader(stream))
                     val content = reader.readText()
@@ -177,11 +186,18 @@ fun MainAppScreen(
         }
     }
 
-    // Video File Picker
+    // Video File Picker (persistable grant for the same reason).
     val videoPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
+        contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         uri?.let {
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    it,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (_: Exception) {
+            }
             val title = it.lastPathSegment ?: "Local Video"
             ttsViewModel.selectDeviceVideo(
                 MxVideoItem(
@@ -300,7 +316,7 @@ fun MainAppScreen(
 
                         // Import Subtitle
                         IconButton(
-                            onClick = { srtPickerLauncher.launch("*/*") },
+                            onClick = { srtPickerLauncher.launch(arrayOf("*/*")) },
                             modifier = Modifier.testTag("import_srt_btn")
                         ) {
                             Icon(Icons.Default.Subtitles, contentDescription = "Import Subtitles")
@@ -330,7 +346,7 @@ fun MainAppScreen(
                                 text = { Text("Pick Local Video File") },
                                 onClick = {
                                     showMenuDropdown = false
-                                    videoPickerLauncher.launch("video/*")
+                                    videoPickerLauncher.launch(arrayOf("video/*"))
                                 },
                                 leadingIcon = { Icon(Icons.Default.FolderOpen, contentDescription = null) }
                             )
@@ -504,7 +520,7 @@ fun MainAppScreen(
                         ttsViewModel = ttsViewModel,
                         onGetExoPlayer = onGetExoPlayer,
                         isLandscape = isLandscape,
-                        onPickSrt = { srtPickerLauncher.launch("*/*") },
+                        onPickSrt = { srtPickerLauncher.launch(arrayOf("*/*")) },
                         onExportVideo = { ttsViewModel.showVideoExportDialog(true) },
                         onBackToFolders = {
                             ttsViewModel.setAppTab(AppTab.LOCAL_FOLDERS)
@@ -516,7 +532,7 @@ fun MainAppScreen(
                     SubtitleDubbingStudioScreen(
                         uiState = uiState,
                         ttsViewModel = ttsViewModel,
-                        onPickSrt = { srtPickerLauncher.launch("*/*") }
+                        onPickSrt = { srtPickerLauncher.launch(arrayOf("*/*")) }
                     )
                 }
 
@@ -740,7 +756,7 @@ fun MainAppScreen(
             onResetDefaults = { ttsViewModel.resetSubtitleAppearanceDefaults() },
             onImportSrt = {
                 ttsViewModel.showSubtitleAppearanceDialog(false)
-                srtPickerLauncher.launch("*/*")
+                srtPickerLauncher.launch(arrayOf("*/*"))
             },
             onDismiss = { ttsViewModel.showSubtitleAppearanceDialog(false) }
         )
@@ -760,7 +776,7 @@ fun MainAppScreen(
             onPlayOriginal = { dontAsk ->
                 if (dontAsk) ttsViewModel.setAutoTranslateNonHindiOnLoad(false)
             },
-            onDismiss = {}
+            onDismiss = { ttsViewModel.dismissAutoTranslatePrompt() }
         )
     }
 
@@ -868,6 +884,39 @@ fun SubtitleDubbingStudioScreen(
                     }
                 }
                 Spacer(modifier = Modifier.height(10.dp))
+                // Non-Hindi subtitle notice (flag was set on load but never shown).
+                if (uiState.showLanguageWarningBanner && uiState.parsedSubtitles.isNotEmpty()) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Subtitles are not in Hindi — translate for Hindi voice, or keep original.",
+                                fontSize = 12.sp,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            TextButton(
+                                onClick = { ttsViewModel.translateCurrentSrtToHindi() },
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
+                            ) {
+                                Text("Translate", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                            TextButton(
+                                onClick = { ttsViewModel.dismissLanguageWarningBanner() },
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
+                            ) {
+                                Text("Keep", fontSize = 12.sp)
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(
                         onClick = { ttsViewModel.translateCurrentSrtToHindi() },

@@ -481,11 +481,20 @@ object VideoExportManager {
                 tempRemuxFile.copyTo(videoOutputFile, overwrite = true)
                 try { tempRemuxFile.delete() } catch (_: Exception) {}
             } else {
+                // Never report an un-dubbed copy as success: the user asked for
+                // mixed Hindi audio, so a remux failure is a real failure.
                 try {
                     if (tempRemuxFile.exists()) tempRemuxFile.delete()
                     if (videoOutputFile.exists()) videoOutputFile.delete()
                 } catch (_: Exception) {}
-                sourceVideoFile.copyTo(videoOutputFile, overwrite = true)
+                try { dubbedAudioFile?.delete() } catch (_: Exception) {}
+                return@withContext VideoExportResult(
+                    success = false,
+                    outputSrtFile = srtOutputFile,
+                    outputAssFile = assOutputFile,
+                    durationMs = durationMs,
+                    errorMessage = "Video muxing failed — dubbed audio ban gaya, par MP4 jodte waqt error aaya. Dobara try karo."
+                )
             }
             try { dubbedAudioFile?.delete() } catch (_: Exception) {}
 
@@ -558,11 +567,17 @@ object VideoExportManager {
             uriString.startsWith("content://") -> {
                 val uri = Uri.parse(uriString)
                 val destFile = File(cacheDir, "content_video_${System.currentTimeMillis()}.mp4")
-                context.contentResolver.openInputStream(uri)?.use { inStream ->
+                val opened = try {
+                    context.contentResolver.openInputStream(uri)
+                } catch (_: Exception) {
+                    null
+                } ?: return null
+                opened.use { inStream ->
                     FileOutputStream(destFile).use { outStream ->
                         inStream.copyTo(outStream)
                     }
                 }
+                if (!destFile.exists() || destFile.length() == 0L) return null
                 destFile
             }
             uriString.startsWith("file://") -> {

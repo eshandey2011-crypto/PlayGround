@@ -327,16 +327,21 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         val activeIndex = if (activeCue != null) parsed.indexOf(activeCue) else -1
         val upcomingIndex = if (upcomingCue != null) parsed.indexOf(upcomingCue) else -1
 
+        // Only consume the cue marker when voice will actually fire; otherwise
+        // scrubbing/pausing over a cue would skip it forever on resume.
+        val shouldSpeak = state.isOfflineSubtitleMode && state.isVideoPlaying &&
+            upcomingCue != null && upcomingIndex != state.lastSpokenSubtitleIndex
+
         _uiState.update {
             it.copy(
                 videoPositionMs = positionMs,
                 activeSubtitle = activeCue,
-                lastSpokenSubtitleIndex = if (upcomingCue != null) upcomingIndex else it.lastSpokenSubtitleIndex
+                lastSpokenSubtitleIndex = if (shouldSpeak) upcomingIndex else it.lastSpokenSubtitleIndex
             )
         }
 
         // Offline Subtitle Reader voice delivery (fires on the lead window).
-        if (state.isOfflineSubtitleMode && state.isVideoPlaying && upcomingCue != null && upcomingIndex != state.lastSpokenSubtitleIndex) {
+        if (shouldSpeak && upcomingCue != null) {
             speakSubtitleCue(upcomingCue)
         }
     }
@@ -471,6 +476,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                         srtLanguageDetection = langDetection,
                         originalSrtBackup = rawText,
                         isTranslatedWithGemini = false,
+                        hasDismissedAutoTranslatePromptForCurrentSrt = false,
                         showLanguageWarningBanner = !langDetection.isHindi && it.autoTranslateNonHindiOnLoad
                     )
                 }
@@ -597,12 +603,25 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         _uiState.update { it.copy(translationError = null) }
     }
 
+    fun dismissLanguageWarningBanner() {
+        _uiState.update { it.copy(showLanguageWarningBanner = false) }
+    }
+
     fun setShowApiKeyDialog(show: Boolean) {
         _uiState.update { it.copy(showApiKeyDialog = show) }
     }
 
     fun setAutoTranslateNonHindiOnLoad(enabled: Boolean) {
         _uiState.update { it.copy(autoTranslateNonHindiOnLoad = enabled) }
+    }
+
+    fun dismissAutoTranslatePrompt() {
+        _uiState.update {
+            it.copy(
+                showAutoTranslatePromptDialog = false,
+                hasDismissedAutoTranslatePromptForCurrentSrt = true
+            )
+        }
     }
 
     fun setCustomGeminiApiKey(apiKey: String) {
@@ -1001,12 +1020,15 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
     }
 
     fun selectDeviceVideo(video: MxVideoItem) {
+        // Stop stale speech and drop any in-flight seek for the previous video.
+        stopSpeaking()
         _uiState.update {
             it.copy(
                 videoUri = video.uriString,
                 videoTitle = video.title,
                 videoDurationMs = video.durationMs.coerceAtLeast(1000L),
                 videoPositionMs = 0L,
+                pendingSeekMs = null,
                 activeSubtitle = null,
                 lastSpokenSubtitleIndex = -1,
                 isVideoPlaying = true,
@@ -1317,9 +1339,10 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
     }
 
     fun cancelVideoExport() {
+        // Don't restore the TTS listener here: the in-flight synthesize call
+        // still owns it until cancellation unwinds, and its handler restores it.
         exportJob?.cancel()
         exportJob = null
-        attachTtsListener()
         _uiState.update {
             it.copy(isExportingVideo = false, videoExportStatus = "Export cancelled")
         }
