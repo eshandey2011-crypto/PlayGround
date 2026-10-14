@@ -1,0 +1,6 @@
+{
+  "name": "SRT Video Player",
+  "description": "Smart SRT Video Player with video export with Hindi subtitles, offline subtitle TTS player, voice narration, subtitle synchronization, subtitle copying, and gestures.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
