@@ -385,7 +385,9 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                 ttsInstance.setSpeechRate(baseSpeed)
 
                 val utteranceId = "cue_${cue.index}_${System.currentTimeMillis()}"
-                ttsInstance.speak(targetText, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+                // QUEUE_ADD: every dialogue speaks FULLY without cutting the
+                // previous one; 1-sec pre-roll keeps it matched to timeline.
+                ttsInstance.speak(targetText, TextToSpeech.QUEUE_ADD, null, utteranceId)
             } catch (e: Exception) {
                 Log.e(TAG, "Error in speakSubtitleCue: ${e.message}", e)
             }
@@ -420,12 +422,31 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
     }
 
     /**
-     * Guarantees an installed offline voice is applied to the engine.
-     * Called on the speak path so internet-off playback never goes silent
-     * because a network voice was selected.
+     * Voice engine routing for the speak path.
+     * Offline ON: guarantees an installed offline voice (never silent offline).
+     * Offline OFF (online): allows the best matching voice even if it needs
+     * network, for higher quality when internet is available.
      */
     private fun ensureOfflineVoiceApplied(state: TtsUiState = _uiState.value) {
         try {
+            val ttsInstance = tts ?: return
+            if (!state.preferOfflineVoice) {
+                // Online mode: pick best language voice, network allowed.
+                val langCode = state.appLanguage.code
+                val langVoices = state.voices.filter { v ->
+                    v.locale.contains(langCode, ignoreCase = true) ||
+                        v.rawVoice?.locale?.language.equals(langCode, ignoreCase = true)
+                }
+                val best = langVoices.firstOrNull() ?: state.selectedVoice
+                val raw = best?.rawVoice
+                if (raw != null && ttsInstance.voice?.name != raw.name) {
+                    try {
+                        ttsInstance.voice = raw
+                    } catch (_: Exception) {
+                    }
+                }
+                return
+            }
             val manager = VoiceManager()
             val params = manager.getVoiceParamsForSpeaker(
                 speaker = null,
@@ -692,10 +713,25 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
     }
 
     fun togglePlayPause() {
+        val wasPlaying = _uiState.value.isVideoPlaying
         _uiState.update { it.copy(isVideoPlaying = !it.isVideoPlaying) }
+        // Pause: stop voice immediately so queued dialogues don't keep
+        // speaking while the video is paused.
+        if (wasPlaying) {
+            try {
+                tts?.stop()
+            } catch (_: Exception) {
+            }
+        }
     }
 
     fun seekTo(positionMs: Long) {
+        // Seek: flush stale queued speeches so voice restarts cleanly
+        // at the new position instead of speaking old timeline.
+        try {
+            tts?.stop()
+        } catch (_: Exception) {
+        }
         val clamped = positionMs.coerceIn(0L, _uiState.value.videoDurationMs.coerceAtLeast(1000L))
         // pendingSeekMs bridges Compose state -> ExoPlayer.seekTo() in the surface view.
         _uiState.update { it.copy(pendingSeekMs = clamped) }
@@ -1001,6 +1037,11 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
     }
 
     fun selectDeviceVideo(video: MxVideoItem) {
+        // New video: clear old queued voice before starting fresh.
+        try {
+            tts?.stop()
+        } catch (_: Exception) {
+        }
         _uiState.update {
             it.copy(
                 videoUri = video.uriString,
@@ -1201,6 +1242,31 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         _uiState.update { it.copy(isVocalClarityBoostEnabled = !it.isVocalClarityBoostEnabled) }
     }
 
+    /**
+     * Screen toggle: offline voice (no internet needed) vs online voice
+     * (best quality, needs internet). Takes effect on the next dialogue.
+     */
+    fun togglePreferOfflineVoice() {
+        val next = !_uiState.value.preferOfflineVoice
+        _uiState.update { it.copy(preferOfflineVoice = next) }
+        try {
+            tts?.stop()
+        } catch (_: Exception) {
+        }
+        ensureOfflineVoiceApplied(_uiState.value)
+        _uiState.update {
+            it.copy(
+                statusMessage = if (next) "Offline voice ON — bina internet ke awaaz"
+                else "Online voice ON — best quality (internet chahiye)"
+            )
+        }
+    }
+
+    fun setPreferOfflineVoice(offline: Boolean) {
+        if (_uiState.value.preferOfflineVoice == offline) return
+        togglePreferOfflineVoice()
+    }
+
     fun testSoundTrack() {
         val lang = _uiState.value.appLanguage
         speakText(if (lang == AppLanguage.HINDI) "यह ऑडियो ट्रैक परीक्षण है।" else "This is an audio track test.")
@@ -1220,7 +1286,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
             it.copy(
                 isPerfectTimingEnabled = enabled,
                 dialogueLeadTimeMs = if (enabled) {
-                    if (it.dialogueLeadTimeMs <= 0L) 400L else it.dialogueLeadTimeMs
+                    if (it.dialogueLeadTimeMs <= 0L) 1000L else it.dialogueLeadTimeMs
                 } else 0L
             )
         }
@@ -1234,7 +1300,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         _uiState.update {
             it.copy(
                 soundTrackSyncDelayMs = 0L,
-                dialogueLeadTimeMs = 400L,
+                dialogueLeadTimeMs = 1000L,
                 isPerfectTimingEnabled = true,
                 lastSpokenSubtitleIndex = -1
             )
@@ -1292,15 +1358,16 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
     }
 
     /**
-     * Per-cue speech rate. When dynamic auto-fit is on, the rate bends
-     * (bounded) so long dialogues still fit inside short cue windows.
+     * Per-cue speech rate. When dynamic auto-fit is on, the rate bends only
+     * slightly (max +15%) so long dialogues stay understandable — never
+     * chipmunk-fast. QUEUE_ADD lets overflow finish instead of rushing.
      */
     private fun rateForCue(cue: SrtItem, state: TtsUiState, speechText: String): Float {
         val base = speedForState(state)
-        if (!state.isDynamicRateAutoFitEnabled) return base
+        if (!state.isDynamicRateAutoFitEnabled) return base.coerceIn(0.5f, 2.0f)
         val windowMs = (cue.endTimeMs - cue.startTimeMs - state.dialogueLeadTimeMs).coerceAtLeast(800L)
         val neededCps = speechText.length / (windowMs / 1000f)
-        return (base * (neededCps / 14f).coerceIn(0.85f, 1.6f)).coerceIn(0.5f, 2.5f)
+        return (base * (neededCps / 14f).coerceIn(0.9f, 1.15f)).coerceIn(0.5f, 2.0f)
     }
 
     // --- Video Export with Hindi dubbing ---
@@ -1436,7 +1503,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                 speechText = DevanagariTransliteration.toPhoneticRoman(speechText)
             }
             ttsInstance.setPitch(pitchForCue(cue, state))
-            ttsInstance.setSpeechRate(rateForCue(cue, state, speechText).coerceIn(0.5f, 2.5f))
+            ttsInstance.setSpeechRate(rateForCue(cue, state, speechText).coerceIn(0.5f, 2.0f))
             if (outFile.exists()) outFile.delete()
             suspendCancellableCoroutine { cont ->
                 val exportUtteranceId = "export_${cue.index}_${System.currentTimeMillis()}"

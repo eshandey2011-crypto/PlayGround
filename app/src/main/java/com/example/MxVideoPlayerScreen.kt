@@ -719,6 +719,18 @@ fun MxPlayerSurfaceBox(
                         )
                     }
 
+                    // Offline / Online voice toggle (screen icon)
+                    IconButton(
+                        onClick = { ttsViewModel.togglePreferOfflineVoice() },
+                        modifier = Modifier.testTag("voice_mode_toggle_btn")
+                    ) {
+                        Icon(
+                            imageVector = if (uiState.preferOfflineVoice) Icons.Default.CloudOff else Icons.Default.Cloud,
+                            contentDescription = if (uiState.preferOfflineVoice) "Offline voice ON (tap for Online)" else "Online voice ON (tap for Offline)",
+                            tint = if (uiState.preferOfflineVoice) Color(0xFF10B981) else Color(0xFFFBBF24)
+                        )
+                    }
+
                     // Aspect Ratio Cycle Button
                     Surface(
                         onClick = { ttsViewModel.cycleAspectRatio() },
@@ -760,6 +772,14 @@ fun MxPlayerSurfaceBox(
                                     onExportVideo()
                                 },
                                 leadingIcon = { Icon(Icons.Default.Movie, contentDescription = null) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(if (uiState.preferOfflineVoice) "Switch to Online Voice" else "Switch to Offline Voice") },
+                                onClick = {
+                                    showPlayerMenu = false
+                                    ttsViewModel.togglePreferOfflineVoice()
+                                },
+                                leadingIcon = { Icon(if (uiState.preferOfflineVoice) Icons.Default.Cloud else Icons.Default.CloudOff, contentDescription = null) }
                             )
                             DropdownMenuItem(
                                 text = { Text("Video Properties") },
