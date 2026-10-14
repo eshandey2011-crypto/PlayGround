@@ -43,10 +43,18 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
 
     private var tts: TextToSpeech? = null
     private var isTtsInitialized = false
+    private var lastTtsRetryMs = 0L
     private val bgmAudioEngine = BgmAudioEngine(context)
 
     private var playbackTrackingJob: Job? = null
     private var speechSynthesisJob: Job? = null
+    /**
+     * Ordered speech queue: every subtitle line is read fully, exactly
+     * once, in order — dense dialogues wait their turn instead of cutting
+     * each other off mid-sentence. Main-thread only (see pumpSpeechQueue).
+     */
+    private val speechQueue = ArrayDeque<SrtItem>()
+    @Volatile private var speechInFlight = false
 
     init {
         initTts()
@@ -121,52 +129,51 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
 
             attachTtsListener()
 
-            // Offline-first voice choice: a network-required voice stays silent
-            // with internet off, so prefer an installed offline voice in the
-            // selected language.
+            // Offline-first voice choice. A network-required voice stays
+            // silent with internet off, so ONLY an installed offline voice in
+            // the selected language is ever assigned. Otherwise the engine
+            // default is kept (best chance of audible speech).
             val langCode = language.code
+            val offlineLangVoice = pickOfflineVoice(availableVoices, langCode)
+            val offlineAnyVoice = availableVoices.firstOrNull { isOfflineVoiceItem(it) }
+            // Displayed selection prefers the language voice even when it is
+            // network-based (user can install it), but the ENGINE only gets
+            // an offline voice — never a network one.
             val langVoices = availableVoices.filter { v ->
                 v.locale.contains(langCode, ignoreCase = true) ||
                     v.rawVoice?.locale?.language.equals(langCode, ignoreCase = true)
             }
-            val offlineLang = langVoices.filter { v ->
-                !v.isNetworkRequired && v.rawVoice?.isNetworkConnectionRequired != true &&
-                    v.rawVoice?.name?.lowercase()?.contains("network") != true
-            }
-            val offlineAny = availableVoices.filter { v ->
-                !v.isNetworkRequired && v.rawVoice?.isNetworkConnectionRequired != true
-            }
-            val chosenVoice = offlineLang.firstOrNull()
-                ?: langVoices.firstOrNull { v -> !v.isNetworkRequired }
+            val chosenVoice = offlineLangVoice
                 ?: langVoices.firstOrNull()
-                ?: offlineAny.firstOrNull()
+                ?: offlineAnyVoice
                 ?: availableVoices.firstOrNull()
-
-            // Apply the offline voice immediately so playback (and export)
-            // never depends on a network voice.
-            chosenVoice?.rawVoice?.let { voice ->
-                val notInstalled = try {
-                    voice.features?.contains(TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED) == true
-                } catch (_: Exception) { false }
-                if (!notInstalled) {
-                    try {
-                        ttsInstance.voice = voice
-                    } catch (_: Exception) {
-                    }
-                }
+            val engineHasTts = try {
+                ttsInstance.engines?.isNotEmpty() == true
+            } catch (_: Exception) {
+                true
             }
+
+            val offlineApplied = applyOfflineVoiceOrKeepDefault(
+                ttsInstance, offlineLangVoice, langCode
+            )
+            val effectivelySupported = isLangSupported && (offlineApplied || offlineLangVoice != null)
 
             _uiState.update {
                 it.copy(
                     speechState = SpeechState.READY,
-                    statusMessage = if (isLangSupported) "${language.nativeName} TTS Ready"
-                    else "${language.nativeName} voice missing — fallback active (install ${language.englishName} voice data for best quality)",
-                    isHindiSupported = if (language == AppLanguage.HINDI) isLangSupported else it.isHindiSupported,
-                    isSpokenLangSupported = isLangSupported,
+                    statusMessage = when {
+                        !engineHasTts -> "No TTS engine on device — install Google Speech Services for voice"
+                        effectivelySupported -> "${language.nativeName} TTS Ready (offline voice)"
+                        isLangSupported -> "${language.nativeName} voice needs download — online only for now (install ${language.englishName} voice data)"
+                        else -> "${language.nativeName} voice missing — fallback active (install ${language.englishName} voice data for best quality)"
+                    },
+                    isHindiSupported = if (language == AppLanguage.HINDI) effectivelySupported else it.isHindiSupported,
+                    isSpokenLangSupported = effectivelySupported,
                     voices = availableVoices,
                     selectedVoice = chosenVoice
                 )
             }
+            refreshOfflineVoiceStatus()
         } catch (e: Exception) {
             Log.e(TAG, "Error configuring TTS: ${e.message}", e)
         }
@@ -179,6 +186,50 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
             if (tags.size >= 2) Locale(tags[0], tags[1]) else Locale(language.code)
         } catch (_: Exception) {
             Locale(language.code)
+        }
+    }
+
+    /** True only for installed on-device voices (audible with internet off). */
+    private fun isOfflineVoiceItem(v: TtsVoiceItem): Boolean {
+        return try {
+            !v.isNetworkRequired &&
+                v.rawVoice?.isNetworkConnectionRequired != true &&
+                v.rawVoice?.name?.lowercase()?.contains("network") != true &&
+                v.rawVoice?.name?.lowercase()?.contains("-online") != true &&
+                v.rawVoice?.features?.contains(TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED) != true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /** Best installed offline voice for a language, or null when none exists. */
+    private fun pickOfflineVoice(voices: List<TtsVoiceItem>, langCode: String): TtsVoiceItem? {
+        val langVoices = voices.filter { v ->
+            v.locale.contains(langCode, ignoreCase = true) ||
+                v.rawVoice?.locale?.language.equals(langCode, ignoreCase = true)
+        }
+        return langVoices.firstOrNull { isOfflineVoiceItem(it) }
+    }
+
+    /**
+     * Applies a voice to the engine only when it is installed on-device AND
+     * matches the target language. Never assigns network/not-installed
+     * voices — that is the #1 cause of silence with internet off.
+     * @return true when a matching offline voice was applied.
+     */
+    private fun applyOfflineVoiceOrKeepDefault(
+        ttsInstance: TextToSpeech,
+        candidate: TtsVoiceItem?,
+        langCode: String
+    ): Boolean {
+        val raw = candidate?.rawVoice ?: return false
+        if (!isOfflineVoiceItem(candidate)) return false
+        if (!raw.locale.language.equals(langCode, ignoreCase = true)) return false
+        return try {
+            ttsInstance.voice = raw
+            true
+        } catch (_: Exception) {
+            false
         }
     }
 
@@ -201,39 +252,28 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                 }
             }
             val langCode = language.code
+            val offlineLangVoice = pickOfflineVoice(_uiState.value.voices, langCode)
             val langVoices = _uiState.value.voices.filter { v ->
                 v.locale.contains(langCode, ignoreCase = true) ||
                     v.rawVoice?.locale?.language.equals(langCode, ignoreCase = true)
             }
-            val offlineLang = langVoices.filter { v ->
-                !v.isNetworkRequired && v.rawVoice?.isNetworkConnectionRequired != true &&
-                    v.rawVoice?.name?.lowercase()?.contains("network") != true
-            }
-            val chosen = offlineLang.firstOrNull()
-                ?: langVoices.firstOrNull { v -> !v.isNetworkRequired }
-                ?: langVoices.firstOrNull()
-            chosen?.rawVoice?.let { voice ->
-                val notInstalled = try {
-                    voice.features?.contains(TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED) == true
-                } catch (_: Exception) { false }
-                if (!notInstalled) {
-                    try {
-                        ttsInstance.voice = voice
-                    } catch (_: Exception) {
-                    }
-                }
-            }
+            val chosen = offlineLangVoice ?: langVoices.firstOrNull()
+            val offlineApplied = applyOfflineVoiceOrKeepDefault(
+                ttsInstance, offlineLangVoice, langCode
+            )
+            val effectivelySupported = supported && (offlineApplied || offlineLangVoice != null)
             stopSpeaking()
             _uiState.update {
                 it.copy(
-                    isHindiSupported = if (language == AppLanguage.HINDI) supported else it.isHindiSupported,
-                    isSpokenLangSupported = supported,
+                    isHindiSupported = if (language == AppLanguage.HINDI) effectivelySupported else it.isHindiSupported,
+                    isSpokenLangSupported = effectivelySupported,
                     selectedVoice = chosen ?: it.selectedVoice,
-                    statusMessage = if (supported) "${language.nativeName} TTS Ready"
+                    statusMessage = if (effectivelySupported) "${language.nativeName} TTS Ready (offline voice)"
                     else "${language.nativeName} voice missing — install ${language.englishName} voice data",
                     previewingPersonaId = null
                 )
             }
+            refreshOfflineVoiceStatus()
         } catch (e: Exception) {
             Log.e(TAG, "Error switching TTS language: ${e.message}", e)
         }
@@ -243,16 +283,22 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
     private fun attachTtsListener() {
         tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) {
+                speechInFlight = true
                 _uiState.update { it.copy(speechState = SpeechState.SPEAKING) }
             }
 
             override fun onDone(utteranceId: String?) {
-                _uiState.update { it.copy(speechState = SpeechState.READY) }
+                // Binder thread: hop to Main before touching the queue.
+                viewModelScope.launch { onSpeechEnded() }
             }
 
             @Deprecated("Deprecated in Java")
             override fun onError(utteranceId: String?) {
-                _uiState.update { it.copy(speechState = SpeechState.READY) }
+                viewModelScope.launch { onSpeechEnded() }
+            }
+
+            override fun onStop(utteranceId: String?, interrupted: Boolean) {
+                viewModelScope.launch { onSpeechEnded() }
             }
         })
     }
@@ -335,15 +381,95 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
             )
         }
 
-        // Offline Subtitle Reader voice delivery (fires on the lead window).
+        // Ordered speech queue: every new line joins the queue and is read
+        // fully, exactly once, in order. A running line is never cut
+        // mid-sentence for the next one — dense dialogues wait their turn.
+        // Stale lines (moment long passed) are dropped, never spoken late.
         if (state.isOfflineSubtitleMode && state.isVideoPlaying && upcomingCue != null && upcomingIndex != state.lastSpokenSubtitleIndex) {
-            speakSubtitleCue(upcomingCue)
+            _uiState.update { it.copy(lastSpokenSubtitleIndex = upcomingIndex) }
+            val prevEnd = parsed.getOrNull(upcomingIndex - 1)?.endTimeMs
+                ?: parsed.getOrNull(state.lastSpokenSubtitleIndex)?.endTimeMs
+            val speaking = state.speechState == SpeechState.SPEAKING || speechInFlight
+            val queueBusy = speechQueue.isNotEmpty()
+            if (!speaking && !queueBusy) {
+                // Engine truly idle: speak right away.
+                speakSubtitleCue(upcomingCue)
+            } else if (!queueBusy && SpeechClarity.mayInterruptSpeech(speaking, prevEnd, effectivePosition)) {
+                // Previous line's moment passed: take over for the new line.
+                speechQueue.clear()
+                try {
+                    tts?.stop()
+                } catch (_: Exception) {
+                }
+                speechInFlight = false
+                speakSubtitleCue(upcomingCue)
+            } else if (speechQueue.none { it.index == upcomingCue.index }) {
+                // Engine busy: wait turn behind the running line.
+                // A non-empty queue is never flushed — queued lines are kept.
+                if (speechQueue.size >= SpeechClarity.QUEUE_MAX_SIZE) {
+                    speechQueue.removeFirst()
+                }
+                speechQueue.addLast(upcomingCue)
+            }
         }
+        // Keep draining: a freshly idle engine picks up the next line.
+        if (speechQueue.isNotEmpty()) {
+            SpeechClarity.dropStaleHeads(speechQueue, effectivePosition)
+            pumpSpeechQueue()
+        }
+    }
+
+    /**
+     * Speaks the next queued line when the engine is idle. Called from the
+     * playback clock and from utterance-end callbacks (via onSpeechEnded).
+     */
+    private fun pumpSpeechQueue() {
+        if (speechInFlight) return
+        if (_uiState.value.speechState == SpeechState.SPEAKING) return
+        val next = speechQueue.firstOrNull() ?: return
+        speechQueue.removeFirst()
+        speakSubtitleCue(next)
+    }
+
+    /** Engine finished / stopped / failed one utterance: advance the queue. */
+    private fun onSpeechEnded() {
+        speechInFlight = false
+        _uiState.update { it.copy(speechState = SpeechState.READY) }
+        viewModelScope.launch { pumpSpeechQueue() }
+    }
+
+    /**
+     * User tapped a subtitle line: hear THIS line now (clears the queue).
+     */
+    fun speakCueNow(cue: SrtItem) {
+        speechQueue.clear()
+        try {
+            tts?.stop()
+        } catch (_: Exception) {
+        }
+        speechInFlight = false
+        val idx = _uiState.value.parsedSubtitles.indexOf(cue)
+        if (idx >= 0) {
+            _uiState.update { it.copy(lastSpokenSubtitleIndex = idx) }
+        }
+        speakSubtitleCue(cue)
     }
 
     fun speakSubtitleCue(cue: SrtItem) {
         val ttsInstance = tts
         if (ttsInstance == null || !isTtsInitialized) {
+            // Engine not ready (common right after install/offline boot):
+            // retry init at most once per 10s, then keep the status honest.
+            val now = System.currentTimeMillis()
+            if (now - lastTtsRetryMs > 10_000L) {
+                lastTtsRetryMs = now
+                try {
+                    tts?.shutdown()
+                } catch (_: Exception) {
+                }
+                isTtsInitialized = false
+                initTts()
+            }
             _uiState.update { it.copy(statusMessage = "TTS engine loading — voice will start automatically") }
             return
         }
@@ -375,6 +501,8 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                 if (!state.isSpokenLangSupported && DevanagariTransliteration.hasDevanagari(targetText)) {
                     targetText = DevanagariTransliteration.toPhoneticRoman(targetText)
                 }
+                // Clarity: terminal pause so words don't run together.
+                targetText = SpeechClarity.withTerminalPause(targetText)
                 if (targetText.isBlank()) return@launch
 
                 // Persona pitch + speed (shared with export synthesis).
@@ -385,7 +513,20 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                 ttsInstance.setSpeechRate(baseSpeed)
 
                 val utteranceId = "cue_${cue.index}_${System.currentTimeMillis()}"
-                ttsInstance.speak(targetText, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+                val rc = try {
+                    ttsInstance.speak(targetText, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+                } catch (_: Exception) {
+                    TextToSpeech.ERROR
+                }
+                if (rc == TextToSpeech.ERROR) {
+                    speechInFlight = false
+                    _uiState.update {
+                        it.copy(statusMessage = "Voice ruk gayi — Offline Voice check me Install dabao")
+                    }
+                    refreshOfflineVoiceStatus()
+                } else {
+                    speechInFlight = true
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Error in speakSubtitleCue: ${e.message}", e)
             }
@@ -402,7 +543,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
             _uiState.value.isOfflineHindiVoiceInSubtitles
         val map = LinkedHashMap<Int, String>(items.size)
         for (item in items) {
-            val spoken = if (!hindiMode) {
+            val raw = if (!hindiMode) {
                 // Multi-language mode: speak subtitles in the selected language as-is.
                 item.cleanSpokenText.ifBlank { item.text }
             } else if (isDevanagari(item.text)) {
@@ -414,6 +555,8 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                     item.text
                 }
             }
+            // Clarity: terminal pause baked in once, so live speech never mumbles.
+            val spoken = SpeechClarity.withTerminalPause(raw)
             if (spoken.isNotBlank()) map[item.index] = spoken
         }
         return map
@@ -697,8 +840,15 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
 
     fun seekTo(positionMs: Long) {
         val clamped = positionMs.coerceIn(0L, _uiState.value.videoDurationMs.coerceAtLeast(1000L))
+        // Fresh moment: drop queued lines, stop current speech, restart at target.
+        speechQueue.clear()
+        speechInFlight = false
+        try {
+            tts?.stop()
+        } catch (_: Exception) {
+        }
         // pendingSeekMs bridges Compose state -> ExoPlayer.seekTo() in the surface view.
-        _uiState.update { it.copy(pendingSeekMs = clamped) }
+        _uiState.update { it.copy(pendingSeekMs = clamped, lastSpokenSubtitleIndex = -1) }
         updateVideoPosition(clamped)
     }
 
@@ -716,7 +866,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
             _uiState.update { it.copy(videoDurationMs = exoDurationMs) }
         }
         if (!st.isVideoPlaying) return
-        if (kotlin.math.abs(exoPositionMs - st.videoPositionMs) > 500L) {
+        if (kotlin.math.abs(exoPositionMs - st.videoPositionMs) > 350L) {
             updateVideoPosition(exoPositionMs.coerceAtLeast(0L))
         }
     }
@@ -857,7 +1007,12 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
     }
 
     fun stopSpeaking() {
-        tts?.stop()
+        speechQueue.clear()
+        speechInFlight = false
+        try {
+            tts?.stop()
+        } catch (_: Exception) {
+        }
         _uiState.update { it.copy(speechState = SpeechState.READY, previewingPersonaId = null) }
     }
 
@@ -1001,6 +1156,12 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
     }
 
     fun selectDeviceVideo(video: MxVideoItem) {
+        speechQueue.clear()
+        speechInFlight = false
+        try {
+            tts?.stop()
+        } catch (_: Exception) {
+        }
         _uiState.update {
             it.copy(
                 videoUri = video.uriString,
@@ -1167,6 +1328,111 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         _uiState.update { it.copy(showLanguageSelectorDialog = show) }
     }
 
+    fun showOfflineSubtitleReaderDialog(show: Boolean) {
+        if (show) refreshOfflineVoiceStatus()
+        _uiState.update { it.copy(showOfflineSubtitleReaderDialog = show) }
+    }
+
+    /**
+     * Recomputes 100%-offline voice readiness from live engine data and
+     * publishes it for the Offline Voice dialog + status badge.
+     */
+    fun refreshOfflineVoiceStatus() {
+        try {
+            val ttsInstance = tts
+            val language = _uiState.value.appLanguage
+            val hasEngine = ttsInstance != null && try {
+                ttsInstance.engines?.isNotEmpty() == true
+            } catch (_: Exception) {
+                isTtsInitialized
+            }
+            val availability = if (ttsInstance != null && isTtsInitialized) {
+                try {
+                    ttsInstance.isLanguageAvailable(ttsLocaleFor(language))
+                } catch (_: Exception) {
+                    TextToSpeech.LANG_NOT_SUPPORTED
+                }
+            } else {
+                TextToSpeech.LANG_MISSING_DATA
+            }
+            val availCode = when {
+                availability >= TextToSpeech.LANG_AVAILABLE -> OfflineVoiceCheck.AVAIL_OK
+                availability == TextToSpeech.LANG_MISSING_DATA -> OfflineVoiceCheck.AVAIL_MISSING_DATA
+                else -> OfflineVoiceCheck.AVAIL_NOT_SUPPORTED
+            }
+            val offlineVoice = pickOfflineVoice(_uiState.value.voices, language.code)
+            val status = OfflineVoiceCheck.decide(
+                languageNativeName = language.nativeName,
+                languageEnglishName = language.englishName,
+                hasEngine = hasEngine,
+                langAvailability = availCode,
+                offlineVoiceName = offlineVoice?.displayName
+            )
+            _uiState.update { it.copy(offlineVoiceStatus = status) }
+        } catch (_: Exception) {
+        }
+    }
+
+    /** Speaks a short test line; reports whether the engine accepted it. */
+    fun testOfflineVoice() {
+        val ttsInstance = tts
+        if (ttsInstance == null || !isTtsInitialized) {
+            _uiState.update { it.copy(statusMessage = "Engine taiyaar nahi — thodi der me Test dobara dabao") }
+            refreshOfflineVoiceStatus()
+            return
+        }
+        try {
+            val language = _uiState.value.appLanguage
+            ensureOfflineVoiceApplied(_uiState.value)
+            val line = if (language == AppLanguage.HINDI) {
+                "नमस्ते! ऑफ़लाइन आवाज़ तैयार है।"
+            } else {
+                "Offline subtitle voice is ready."
+            }
+            ttsInstance.setPitch(1.0f)
+            ttsInstance.setSpeechRate(0.95f)
+            val rc = ttsInstance.speak(
+                SpeechClarity.withTerminalPause(line),
+                TextToSpeech.QUEUE_FLUSH, null,
+                "offline_test_${System.currentTimeMillis()}"
+            )
+            _uiState.update {
+                it.copy(
+                    statusMessage = if (rc == TextToSpeech.SUCCESS) "Test voice chal rahi hai — suno!"
+                    else "Test fail — Offline Voice dialog me Install dabao"
+                )
+            }
+            refreshOfflineVoiceStatus()
+        } catch (e: Exception) {
+            Log.e(TAG, "Voice test failed: ${e.message}", e)
+        }
+    }
+
+    /** One-tap download of missing offline voice data (needs internet once). */
+    fun installTtsVoiceData() {
+        try {
+            val intent = android.content.Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA).apply {
+                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+        } catch (e: Exception) {
+            Log.e(TAG, "Install intent failed: ${e.message}", e)
+            _uiState.update { it.copy(statusMessage = "Play Store se 'Google Speech Services' install karo") }
+        }
+    }
+
+    /** Opens system TTS settings (engine + voice data management). */
+    fun openTtsSettings() {
+        try {
+            val intent = android.content.Intent("com.android.settings.TTS_SETTINGS").apply {
+                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+        } catch (_: Exception) {
+            installTtsVoiceData()
+        }
+    }
+
     fun showGenderDialog(show: Boolean) {
         _uiState.update { it.copy(showGenderDialog = show) }
     }
@@ -1220,7 +1486,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
             it.copy(
                 isPerfectTimingEnabled = enabled,
                 dialogueLeadTimeMs = if (enabled) {
-                    if (it.dialogueLeadTimeMs <= 0L) 400L else it.dialogueLeadTimeMs
+                    if (it.dialogueLeadTimeMs <= 0L) 200L else it.dialogueLeadTimeMs
                 } else 0L
             )
         }
@@ -1234,7 +1500,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         _uiState.update {
             it.copy(
                 soundTrackSyncDelayMs = 0L,
-                dialogueLeadTimeMs = 400L,
+                dialogueLeadTimeMs = 200L,
                 isPerfectTimingEnabled = true,
                 lastSpokenSubtitleIndex = -1
             )
@@ -1287,20 +1553,27 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
     }
 
     private fun speedForState(state: TtsUiState): Float {
-        val mult = if (state.isFastSubtitleSpeechEnabled) state.fastSubtitleSpeechMultiplier else 1.0f
-        return (state.speedProgress / 50f).coerceIn(0.5f, 2.0f) * mult
+        return SpeechClarity.baseRate(
+            state.speedProgress,
+            state.isFastSubtitleSpeechEnabled,
+            state.fastSubtitleSpeechMultiplier
+        )
     }
 
     /**
      * Per-cue speech rate. When dynamic auto-fit is on, the rate bends
-     * (bounded) so long dialogues still fit inside short cue windows.
+     * slightly so long dialogues still fit inside short cue windows —
+     * always bounded to clear-speech range (see [SpeechClarity]).
      */
     private fun rateForCue(cue: SrtItem, state: TtsUiState, speechText: String): Float {
         val base = speedForState(state)
-        if (!state.isDynamicRateAutoFitEnabled) return base
-        val windowMs = (cue.endTimeMs - cue.startTimeMs - state.dialogueLeadTimeMs).coerceAtLeast(800L)
-        val neededCps = speechText.length / (windowMs / 1000f)
-        return (base * (neededCps / 14f).coerceIn(0.85f, 1.6f)).coerceIn(0.5f, 2.5f)
+        val windowMs = cue.endTimeMs - cue.startTimeMs - state.dialogueLeadTimeMs
+        return SpeechClarity.autofitRate(
+            base,
+            speechText.length,
+            windowMs,
+            state.isDynamicRateAutoFitEnabled
+        )
     }
 
     // --- Video Export with Hindi dubbing ---
@@ -1435,8 +1708,11 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
             if (!state.isSpokenLangSupported && DevanagariTransliteration.hasDevanagari(speechText)) {
                 speechText = DevanagariTransliteration.toPhoneticRoman(speechText)
             }
+            // Clarity: terminal pause, same as live speech.
+            speechText = SpeechClarity.withTerminalPause(speechText)
+            if (speechText.isBlank()) return false
             ttsInstance.setPitch(pitchForCue(cue, state))
-            ttsInstance.setSpeechRate(rateForCue(cue, state, speechText).coerceIn(0.5f, 2.5f))
+            ttsInstance.setSpeechRate(rateForCue(cue, state, speechText).coerceIn(0.5f, 1.5f))
             if (outFile.exists()) outFile.delete()
             suspendCancellableCoroutine { cont ->
                 val exportUtteranceId = "export_${cue.index}_${System.currentTimeMillis()}"

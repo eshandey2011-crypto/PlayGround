@@ -73,8 +73,28 @@ data class GestureConfig(
     val brightnessSensitivity: Float = 1.15f,
     val volumeSensitivity: Float = 1.15f,
     val maxHorizontalSeekSpanMs: Long = 90000L,
+    /** Full-width swipe covers this fraction of the video (capped by max span). */
+    val swipeSpanFractionOfDuration: Float = 0.25f,
+    /** Swipes smaller than this are treated as tap wobble, not seeks. */
+    val minSeekCommitMs: Long = 1000L,
     val hudDismissDelayMs: Long = 900L
 )
+
+/**
+ * Maps a horizontal swipe fraction (-1..1 across screen width) to a seek
+ * delta. Proportional to video length so a small drag on a short clip no
+ * longer jumps "pura back", while long movies still scrub up to maxSpan.
+ */
+fun swipeSeekDeltaMs(
+    fraction: Float,
+    durationMs: Long,
+    maxSpanMs: Long = 90000L,
+    spanFraction: Float = 0.25f
+): Long {
+    if (durationMs <= 0) return 0L
+    val span = minOf(maxSpanMs, (durationMs * spanFraction).toLong().coerceAtLeast(5000L))
+    return (fraction * span).toLong()
+}
 
 interface PlayerGestureListener {
     fun onSingleTap()
@@ -174,7 +194,12 @@ class PlayerGestureController(
             GestureHudType.SEEK -> {
                 if (durationMs > 0 && viewSize.width > 0) {
                     val fraction = totalDeltaX / viewSize.width
-                    val seekDelta = (fraction * config.maxHorizontalSeekSpanMs).toLong()
+                    val seekDelta = swipeSeekDeltaMs(
+                        fraction,
+                        durationMs,
+                        config.maxHorizontalSeekSpanMs,
+                        config.swipeSpanFractionOfDuration
+                    )
                     val target = (seekStartPositionMs + seekDelta).coerceIn(0L, durationMs)
                     listener?.onSeekGestureProgress(seekDelta, target)
                 }

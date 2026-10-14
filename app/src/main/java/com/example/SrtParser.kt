@@ -265,6 +265,10 @@ object SrtParser {
         val normalized = content.replace("\uFEFF", "").replace("\r\n", "\n").replace("\r", "\n")
         val blocks = normalized.split(Regex("\n{2,}"))
         var generatedIndex = 1
+        // Cue numbers in real-world files are often duplicated or out of order.
+        // Guarantee unique in-memory indices so index-keyed consumers
+        // (speech cache, export, sync) never collide.
+        val usedIndices = mutableSetOf<Int>()
 
         for (rawBlock in blocks) {
             val block = rawBlock.trim()
@@ -291,10 +295,14 @@ object SrtParser {
             }
 
             if (timeLineIndex != -1 && startTimeMs >= 0 && endTimeMs >= startTimeMs) {
-                val parsedIndex = if (timeLineIndex > 0) {
+                var parsedIndex = if (timeLineIndex > 0) {
                     lines[0].toIntOrNull() ?: generatedIndex
                 } else {
                     generatedIndex
+                }
+                if (!usedIndices.add(parsedIndex)) {
+                    while (!usedIndices.add(generatedIndex)) generatedIndex++
+                    parsedIndex = generatedIndex
                 }
                 val textLines = lines.subList(timeLineIndex + 1, lines.size)
                 val cleanText = textLines.joinToString(" ")
@@ -341,6 +349,8 @@ object SrtParser {
         val normalized = content.replace("\uFEFF", "").replace("\r\n", "\n").replace("\r", "\n")
         val rawBlocks = normalized.split(Regex("\n{2,}"))
         var generatedIndex = 1
+        // See parseSrt: file cue numbers may collide; keep indices unique.
+        val usedIndices = mutableSetOf<Int>()
 
         for (rawBlock in rawBlocks) {
             val block = rawBlock.trim()
@@ -381,10 +391,14 @@ object SrtParser {
             }
 
             if (timeLineIndex != -1 && startTimeMs >= 0 && endTimeMs >= startTimeMs) {
-                val parsedIndex = if (timeLineIndex > 0) {
+                var parsedIndex = if (timeLineIndex > 0) {
                     lines[0].toIntOrNull() ?: generatedIndex
                 } else {
                     generatedIndex
+                }
+                if (!usedIndices.add(parsedIndex)) {
+                    while (!usedIndices.add(generatedIndex)) generatedIndex++
+                    parsedIndex = generatedIndex
                 }
                 val textLines = lines.subList(timeLineIndex + 1, lines.size)
                 var rawPayload = textLines.joinToString(" ").trim()

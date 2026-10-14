@@ -253,7 +253,7 @@ fun MxVideoPlayerScreen(
                                             .fillMaxWidth()
                                             .clickable {
                                                 ttsViewModel.seekTo(cue.startTimeMs)
-                                                ttsViewModel.speakSubtitleCue(cue)
+                                                ttsViewModel.speakCueNow(cue)
                                             }
                                     ) {
                                         Row(
@@ -275,7 +275,7 @@ fun MxVideoPlayerScreen(
                                                 )
                                             }
                                             IconButton(
-                                                onClick = { ttsViewModel.speakSubtitleCue(cue) },
+                                                onClick = { ttsViewModel.speakCueNow(cue) },
                                                 modifier = Modifier.size(32.dp)
                                             ) {
                                                 Icon(
@@ -473,7 +473,11 @@ fun MxPlayerSurfaceBox(
             }
 
             override fun onSeekGestureCommit(targetPositionMs: Long) {
-                ttsViewModel.seekTo(targetPositionMs)
+                // Ignore tap-wobble drags: tiny swipes must not jump the video.
+                if (kotlin.math.abs(currentSeekDeltaMs) >= 1000L) {
+                    ttsViewModel.seekTo(targetPositionMs)
+                }
+                currentSeekDeltaMs = 0L
             }
 
             override fun onGestureHudChanged(hudType: GestureHudType) {
@@ -501,8 +505,9 @@ fun MxPlayerSurfaceBox(
         )
 
         // Subtitles on Video Display
-        if (uiState.showSubtitlesOnVideo && uiState.activeSubtitle != null) {
-            val cue = uiState.activeSubtitle!!
+        val activeCue = uiState.activeSubtitle
+        if (uiState.showSubtitlesOnVideo && activeCue != null) {
+            val cue = activeCue
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -808,6 +813,14 @@ fun MxPlayerSurfaceBox(
                                     ttsViewModel.showSubtitleSyncSlider(true)
                                 },
                                 leadingIcon = { Icon(Icons.Default.SyncAlt, contentDescription = null) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Offline Voice (100% Offline)") },
+                                onClick = {
+                                    showPlayerMenu = false
+                                    ttsViewModel.showOfflineSubtitleReaderDialog(true)
+                                },
+                                leadingIcon = { Icon(Icons.Default.RecordVoiceOver, contentDescription = null) }
                             )
                             DropdownMenuItem(
                                 text = { Text("Audio Tracks & Sound") },

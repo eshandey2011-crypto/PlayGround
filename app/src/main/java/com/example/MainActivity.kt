@@ -367,6 +367,14 @@ fun MainAppScreen(
                                 leadingIcon = { Icon(Icons.Default.Language, contentDescription = null) }
                             )
                             DropdownMenuItem(
+                                text = { Text("Offline Voice Check") },
+                                onClick = {
+                                    showMenuDropdown = false
+                                    ttsViewModel.showOfflineSubtitleReaderDialog(true)
+                                },
+                                leadingIcon = { Icon(Icons.Default.RecordVoiceOver, contentDescription = null) }
+                            )
+                            DropdownMenuItem(
                                 text = { Text("Gemini API Key") },
                                 onClick = {
                                     showMenuDropdown = false
@@ -549,6 +557,16 @@ fun MainAppScreen(
                 ttsViewModel.setDecoderMode(mode)
             },
             onDismiss = { ttsViewModel.showDecoderDialog(false) }
+        )
+    }
+
+    if (uiState.showOfflineSubtitleReaderDialog) {
+        OfflineVoiceDialog(
+            uiState = uiState,
+            onTestVoice = { ttsViewModel.testOfflineVoice() },
+            onInstallVoiceData = { ttsViewModel.installTtsVoiceData() },
+            onOpenTtsSettings = { ttsViewModel.openTtsSettings() },
+            onDismiss = { ttsViewModel.showOfflineSubtitleReaderDialog(false) }
         )
     }
 
@@ -935,7 +953,7 @@ fun SubtitleDubbingStudioScreen(
                             Spacer(modifier = Modifier.height(3.dp))
                             Text(text = cue.text, fontSize = 13.sp)
                         }
-                        IconButton(onClick = { ttsViewModel.speakSubtitleCue(cue) }) {
+                        IconButton(onClick = { ttsViewModel.speakCueNow(cue) }) {
                             Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = "Speak", tint = MxBluePrimary)
                         }
                     }
