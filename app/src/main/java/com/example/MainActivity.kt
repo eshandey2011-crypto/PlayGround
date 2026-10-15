@@ -673,6 +673,23 @@ fun MainAppScreen(
         )
     }
 
+    if (uiState.showOfflineSubtitleReaderDialog) {
+        SubtitleReaderOptionsDialog(
+            uiState = uiState,
+            onSelectLanguage = { ttsViewModel.setAppLanguage(it) },
+            onToggleOfflineVoice = { ttsViewModel.togglePreferOfflineVoice() },
+            onToggleContinuous = { ttsViewModel.toggleSubtitleReaderContinuous() },
+            onDelayChange = { ttsViewModel.setSubtitleReaderDelay(it) },
+            onStartReader = { ttsViewModel.startSubtitleReader() },
+            onStopReader = { ttsViewModel.stopSubtitleReader() },
+            onOpenVoiceProfiles = {
+                ttsViewModel.showOfflineSubtitleReaderDialog(false)
+                ttsViewModel.showVoiceProfilesDialog(true)
+            },
+            onDismiss = { ttsViewModel.showOfflineSubtitleReaderDialog(false) }
+        )
+    }
+
     if (uiState.showSpeedMenu) {
         AlertDialog(
             onDismissRequest = { ttsViewModel.showSpeedMenu(false) },
@@ -895,6 +912,39 @@ fun SubtitleDubbingStudioScreen(
                         Icon(Icons.Default.RecordVoiceOver, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(4.dp))
                         Text("Voice", fontSize = 11.sp)
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = { ttsViewModel.showOfflineSubtitleReaderDialog(true) },
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("dubbing_reader_options_btn")
+                    ) {
+                        Icon(
+                            Icons.Default.PlayArrow,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                            tint = if (uiState.isSubtitleReaderPlaying) Color(0xFF10B981) else MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            if (uiState.isSubtitleReaderPlaying) "Reading... (Options)" else "Reader Options (${uiState.appLanguage.nativeName})",
+                            fontSize = 11.sp
+                        )
+                    }
+                    if (uiState.isSubtitleReaderPlaying) {
+                        OutlinedButton(
+                            onClick = { ttsViewModel.stopSubtitleReader() },
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Stop Reader", fontSize = 11.sp)
+                        }
                     }
                 }
             }

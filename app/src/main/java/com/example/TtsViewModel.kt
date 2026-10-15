@@ -901,6 +901,82 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "sample_${System.currentTimeMillis()}")
     }
 
+    // --- Multi-language Subtitle Reader (standalone, works with/without video) ---
+
+    private var subtitleReaderJob: Job? = null
+
+    fun showOfflineSubtitleReaderDialog(show: Boolean) {
+        _uiState.update { it.copy(showOfflineSubtitleReaderDialog = show) }
+    }
+
+    fun setSubtitleReaderDelay(seconds: Float) {
+        _uiState.update { it.copy(subtitleReaderDelaySeconds = seconds.coerceIn(0f, 5f)) }
+    }
+
+    fun toggleSubtitleReaderContinuous() {
+        _uiState.update { it.copy(isSubtitleReaderContinuous = !it.isSubtitleReaderContinuous) }
+    }
+
+    fun setSubtitleReaderContinuous(continuous: Boolean) {
+        _uiState.update { it.copy(isSubtitleReaderContinuous = continuous) }
+    }
+
+    /** Starts reading loaded subtitles aloud in the selected reader language. */
+    fun startSubtitleReader(fromIndex: Int = 0) {
+        val cues = _uiState.value.parsedSubtitles
+        if (cues.isEmpty()) {
+            _uiState.update { it.copy(statusMessage = "Pehle Add Subtitle se .srt file jodo") }
+            return
+        }
+        stopSubtitleReader(keepStatus = true)
+        val startIdx = fromIndex.coerceIn(0, cues.size - 1)
+        _uiState.update { it.copy(isSubtitleReaderPlaying = true, readingSubtitleIndex = startIdx) }
+        subtitleReaderJob = viewModelScope.launch {
+            try {
+                var idx = startIdx
+                while (isActive) {
+                    val state = _uiState.value
+                    val items = state.parsedSubtitles
+                    if (idx < 0 || idx >= items.size) break
+                    _uiState.update { it.copy(readingSubtitleIndex = idx) }
+                    val cue = items[idx]
+                    speakSubtitleCue(cue)
+                    if (!state.isSubtitleReaderContinuous) break
+                    // Wait for speech + user-configured gap before next cue.
+                    val rate = try {
+                        rateForCue(cue, state, state.speechTextCache[cue.index] ?: cue.text)
+                    } catch (_: Exception) { 1.0f }
+                    val estMs = ((cue.text.length * 90L) / rate.coerceAtLeast(0.5f).toLong())
+                        .coerceIn(1200L, 12000L) + (state.subtitleReaderDelaySeconds * 1000L).toLong()
+                    delay(estMs)
+                    idx++
+                    if (idx >= items.size) break
+                }
+            } catch (_: CancellationException) {
+            } finally {
+                _uiState.update { it.copy(isSubtitleReaderPlaying = false) }
+            }
+        }
+    }
+
+    fun stopSubtitleReader(keepStatus: Boolean = false) {
+        subtitleReaderJob?.cancel()
+        subtitleReaderJob = null
+        try {
+            tts?.stop()
+        } catch (_: Exception) {
+        }
+        _uiState.update { it.copy(isSubtitleReaderPlaying = false) }
+        if (!keepStatus) {
+            _uiState.update { it.copy(statusMessage = "Subtitle reader stopped") }
+        }
+    }
+
+    fun toggleSubtitleReader() {
+        if (_uiState.value.isSubtitleReaderPlaying) stopSubtitleReader()
+        else startSubtitleReader(_uiState.value.readingSubtitleIndex.coerceAtLeast(0))
+    }
+
     fun setGenderVoiceMode(mode: GenderVoiceMode) {
         _uiState.update { it.copy(genderVoiceMode = mode) }
     }
@@ -1545,6 +1621,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         super.onCleared()
         playbackTrackingJob?.cancel()
         speechSynthesisJob?.cancel()
+        subtitleReaderJob?.cancel()
         tts?.stop()
         tts?.shutdown()
         bgmAudioEngine.stop()

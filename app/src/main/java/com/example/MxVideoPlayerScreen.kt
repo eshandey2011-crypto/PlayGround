@@ -233,6 +233,23 @@ fun MxVideoPlayerScreen(
                                         Spacer(modifier = Modifier.width(4.dp))
                                         Text("Style", fontSize = 11.sp)
                                     }
+                                    TextButton(
+                                        onClick = { ttsViewModel.showOfflineSubtitleReaderDialog(true) },
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                        modifier = Modifier.testTag("player_reader_options_btn")
+                                    ) {
+                                        Icon(
+                                            Icons.Default.RecordVoiceOver,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp),
+                                            tint = if (uiState.isSubtitleReaderPlaying) Color(0xFF10B981) else MaterialTheme.colorScheme.primary
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            if (uiState.isSubtitleReaderPlaying) "Reading..." else "Reader",
+                                            fontSize = 11.sp
+                                        )
+                                    }
                                 }
                             }
 
@@ -860,6 +877,14 @@ fun MxPlayerSurfaceBox(
                                     ttsViewModel.showZoomControlsDialog(true)
                                 },
                                 leadingIcon = { Icon(Icons.Default.CropFree, contentDescription = null) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Subtitle Reader Options") },
+                                onClick = {
+                                    showPlayerMenu = false
+                                    ttsViewModel.showOfflineSubtitleReaderDialog(true)
+                                },
+                                leadingIcon = { Icon(Icons.Default.RecordVoiceOver, contentDescription = null) }
                             )
                             DropdownMenuItem(
                                 text = { Text("Gesture Guide & Help") },
