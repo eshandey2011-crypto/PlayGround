@@ -51,7 +51,6 @@ import androidx.compose.ui.window.DialogProperties
 @Composable
 fun AutoTranslatePromptDialog(
     uiState: TtsUiState,
-    onTranslateWithGemini: (dontAskAgain: Boolean) -> Unit,
     onTranslateOffline: (dontAskAgain: Boolean) -> Unit,
     onPlayOriginal: (dontAskAgain: Boolean) -> Unit,
     onDismiss: () -> Unit

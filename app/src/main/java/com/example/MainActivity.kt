@@ -367,14 +367,6 @@ fun MainAppScreen(
                                 leadingIcon = { Icon(Icons.Default.Language, contentDescription = null) }
                             )
                             DropdownMenuItem(
-                                text = { Text("Gemini API Key") },
-                                onClick = {
-                                    showMenuDropdown = false
-                                    ttsViewModel.setShowApiKeyDialog(true)
-                                },
-                                leadingIcon = { Icon(Icons.Default.Key, contentDescription = null) }
-                            )
-                            DropdownMenuItem(
                                 text = { Text("Gestures & User Guide") },
                                 onClick = {
                                     showMenuDropdown = false
@@ -745,7 +737,7 @@ fun MainAppScreen(
             backgroundOpacity = uiState.subtitleBackgroundOpacity,
             alignment = uiState.subtitleAlignment,
             showSubtitlesOnVideo = uiState.showSubtitlesOnVideo,
-            isTranslatedToHindi = uiState.isTranslatedWithGemini,
+            isTranslatedToHindi = uiState.isTranslatedToHindi,
             currentSrtFileName = uiState.currentSrtFileName,
             isTranslatingSrt = uiState.isTranslatingSrt,
             subtitleFormat = uiState.detectedSubtitleFormat,
@@ -754,6 +746,8 @@ fun MainAppScreen(
             onBackgroundOpacityChange = { ttsViewModel.setSubtitleBackgroundOpacity(it) },
             onAlignmentChange = { ttsViewModel.setSubtitleAlignment(it) },
             onToggleShowSubtitles = { ttsViewModel.toggleShowSubtitlesOnVideo() },
+            onSelectHindi = { ttsViewModel.translateCurrentSrtToHindi() },
+            onSelectEnglish = { ttsViewModel.revertToOriginalSrt() },
             onResetDefaults = { ttsViewModel.resetSubtitleAppearanceDefaults() },
             onImportSrt = {
                 ttsViewModel.showSubtitleAppearanceDialog(false)
@@ -766,10 +760,6 @@ fun MainAppScreen(
     if (uiState.showAutoTranslatePromptDialog) {
         AutoTranslatePromptDialog(
             uiState = uiState,
-            onTranslateWithGemini = { dontAsk ->
-                if (dontAsk) ttsViewModel.setAutoTranslateNonHindiOnLoad(true)
-                ttsViewModel.translateCurrentSrtToHindi()
-            },
             onTranslateOffline = { dontAsk ->
                 if (dontAsk) ttsViewModel.setAutoTranslateNonHindiOnLoad(true)
                 ttsViewModel.translateCurrentSrtToHindi()
@@ -802,14 +792,6 @@ fun MainAppScreen(
             subtitleCount = uiState.parsedSubtitles.size,
             onDismiss = { ttsViewModel.showSaveProjectDialog(false) },
             onConfirmSave = { title -> ttsViewModel.saveCurrentProject(title) }
-        )
-    }
-
-    if (uiState.showApiKeyDialog) {
-        GeminiApiKeyDialog(
-            uiState = uiState,
-            viewModel = ttsViewModel,
-            onDismissRequest = { ttsViewModel.setShowApiKeyDialog(false) }
         )
     }
 

@@ -249,6 +249,7 @@ data class TtsUiState(
     val isSameToSameTimeDelivery: Boolean = true,
     val subtitleOffsetMs: Long = 0L,
     val dialogueLeadTimeMs: Long = 1000L,
+    val voiceMsPerChar: Float = VoiceMatch.DEFAULT_MS_PER_CHAR,
     val isPerfectTimingEnabled: Boolean = true,
     val isDynamicRateAutoFitEnabled: Boolean = true,
     val showPerfectTimingDialog: Boolean = false,
@@ -331,14 +332,9 @@ data class TtsUiState(
     val srtHistoryFilter: SrtHistorySource? = null,
     val showSubtitleSyncDialog: Boolean = false,
     val isTranslatingSrt: Boolean = false,
-    val translationProgressMessage: String = "",
-    val translationError: String? = null,
     val autoTranslateNonHindiOnLoad: Boolean = true,
     val originalSrtBackup: String? = null,
-    val isTranslatedWithGemini: Boolean = false,
-    val customGeminiApiKey: String = "",
-    val showApiKeyDialog: Boolean = false,
-    val showTranslationConfirmationDialog: Boolean = false,
+    val isTranslatedToHindi: Boolean = false,
     val showAutoTranslatePromptDialog: Boolean = false,
     val enableAutoTranslatePromptBeforePlayback: Boolean = true,
     val hasDismissedAutoTranslatePromptForCurrentSrt: Boolean = false,
@@ -401,6 +397,4 @@ val TtsUiState.hasAnyOpenDialog: Boolean
             showBgmTrackMixerDialog ||
             showLanguageSelectorDialog ||
             showSrtLibraryDialog ||
-            showApiKeyDialog ||
-            showTranslationConfirmationDialog ||
             showOrientationDialog

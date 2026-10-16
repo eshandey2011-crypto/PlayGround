@@ -48,6 +48,11 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
     private var playbackTrackingJob: Job? = null
     private var speechSynthesisJob: Job? = null
 
+    // Live TTS queue tracking (prevents unbounded QUEUE_ADD pile-up which
+    // makes the engine lag, truncate and skip words).
+    @Volatile private var ttsQueueDepth = 0
+    @Volatile private var lastQueuedCueEndMs = 0L
+
     init {
         initTts()
         loadInitialData()
@@ -167,6 +172,8 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                     selectedVoice = chosenVoice
                 )
             }
+            // Measure the real voice pace for subtitle↔voice matching.
+            calibrateVoiceTiming()
         } catch (e: Exception) {
             Log.e(TAG, "Error configuring TTS: ${e.message}", e)
         }
@@ -234,6 +241,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                     previewingPersonaId = null
                 )
             }
+            calibrateVoiceTiming()
         } catch (e: Exception) {
             Log.e(TAG, "Error switching TTS language: ${e.message}", e)
         }
@@ -247,14 +255,40 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
             }
 
             override fun onDone(utteranceId: String?) {
-                _uiState.update { it.copy(speechState = SpeechState.READY) }
+                onLiveCueFinished(utteranceId)
             }
 
             @Deprecated("Deprecated in Java")
             override fun onError(utteranceId: String?) {
-                _uiState.update { it.copy(speechState = SpeechState.READY) }
+                onLiveCueFinished(utteranceId)
+            }
+
+            override fun onStop(utteranceId: String?, interrupted: Boolean) {
+                onLiveCueFinished(utteranceId)
             }
         })
+    }
+
+    private fun onLiveCueFinished(utteranceId: String?) {
+        if (utteranceId?.startsWith("cue_") == true) {
+            ttsQueueDepth = (ttsQueueDepth - 1).coerceAtLeast(0)
+        }
+        if (ttsQueueDepth == 0) {
+            _uiState.update { it.copy(speechState = SpeechState.READY) }
+        }
+    }
+
+    /**
+     * Clears the engine queue AND resets tracking. Use everywhere instead of
+     * a bare tts.stop() so the queue can never desync from our counter.
+     */
+    private fun flushTtsQueue() {
+        try {
+            tts?.stop()
+        } catch (_: Exception) {
+        }
+        ttsQueueDepth = 0
+        lastQueuedCueEndMs = 0L
     }
 
     private fun loadInitialData() {
@@ -312,16 +346,30 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         val state = _uiState.value
         val effectivePosition = positionMs + state.soundTrackSyncDelayMs
         val parsed = state.parsedSubtitles
-        // Lead-time pre-roll: start speaking slightly BEFORE the cue appears
-        // so voice lands on time instead of lagging behind video.
-        val leadMs = state.dialogueLeadTimeMs.coerceIn(0L, 2000L)
+        // Voice-matched pre-roll: each cue gets its own speak-ahead window so
+        // the voice ENDS with the subtitle (measured pace, no rushing).
+        val baseLead = state.dialogueLeadTimeMs.coerceIn(0L, VoiceMatch.MAX_LEAD_MS)
+        val baseRate = try {
+            speedForState(state)
+        } catch (_: Exception) {
+            1.0f
+        }
 
-        // Find active subtitle cue (lead window for voice, exact window for display)
+        // Active cue for DISPLAY (exact window).
         val activeCue = parsed.firstOrNull { cue ->
             effectivePosition in cue.startTimeMs..cue.endTimeMs
         }
-        val upcomingCue = parsed.firstOrNull { cue ->
-            effectivePosition in (cue.startTimeMs - leadMs)..cue.endTimeMs
+        // Upcoming cue for VOICE (voice completes before subtitle appears).
+        var upcomingCue: SrtItem? = null
+        for (cue in parsed) {
+            if (effectivePosition > cue.endTimeMs) continue
+            val textLen = (state.speechTextCache[cue.index] ?: cue.text).length
+            val estMs = VoiceMatch.estimateSpeechMs(textLen, state.voiceMsPerChar, baseRate)
+            val lead = VoiceMatch.matchLeadMs(estMs, baseLead)
+            if (effectivePosition >= cue.startTimeMs - lead) {
+                upcomingCue = cue
+                break
+            }
         }
 
         val activeIndex = if (activeCue != null) parsed.indexOf(activeCue) else -1
@@ -362,10 +410,11 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                 // Precomputed at subtitle load (no per-cue regex cost -> no lag).
                 var targetText = state.speechTextCache[cue.index]
                 if (targetText.isNullOrBlank()) {
+                    val dialogue = dialogueForSpeech(cue)
                     targetText = if (state.appLanguage == AppLanguage.HINDI || state.isOfflineHindiVoiceInSubtitles) {
-                        if (isDevanagari(cue.text)) cue.text else OfflineSubtitleEngine.translateLineToHindi(cue.text)
+                        if (isDevanagari(dialogue)) dialogue else OfflineSubtitleEngine.translateLineToHindi(dialogue)
                     } else {
-                        cue.cleanSpokenText.ifBlank { cue.text }
+                        dialogue.ifBlank { cue.text }
                     }
                 }
 
@@ -385,9 +434,22 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                 ttsInstance.setSpeechRate(baseSpeed)
 
                 val utteranceId = "cue_${cue.index}_${System.currentTimeMillis()}"
-                // QUEUE_ADD: every dialogue speaks FULLY without cutting the
-                // previous one; 1-sec pre-roll keeps it matched to timeline.
+                // Bounded queue: every dialogue speaks FULLY (QUEUE_ADD), but the
+                // queue never grows past 2 waiting utterances (pre-speak needs
+                // room: next voice starts while current finishes). If the engine
+                // is hopelessly behind (stale speech from an ended cue, or 3+
+                // backed up), resync to the newest cue instead of letting the
+                // engine lag, truncate and skip words.
+                val videoNow = _uiState.value.videoPositionMs
+                val queueStuck = ttsQueueDepth >= 3
+                val speakingStaleCue = ttsQueueDepth >= 1 &&
+                    lastQueuedCueEndMs > 0L && lastQueuedCueEndMs < videoNow - 300L
+                if (queueStuck || speakingStaleCue) {
+                    flushTtsQueue()
+                }
                 ttsInstance.speak(targetText, TextToSpeech.QUEUE_ADD, null, utteranceId)
+                ttsQueueDepth++
+                lastQueuedCueEndMs = maxOf(lastQueuedCueEndMs, cue.endTimeMs)
             } catch (e: Exception) {
                 Log.e(TAG, "Error in speakSubtitleCue: ${e.message}", e)
             }
@@ -398,22 +460,35 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         return text.any { it in '\u0900'..'\u097F' }
     }
 
+    /**
+     * Dialogue-only text for speech: speaker-tag brackets ("[Rahul]:", "(हँसी)")
+     * are stripped because TTS engines stumble on them and drop nearby words.
+     * Every dialogue word is preserved — display text is untouched.
+     */
+    internal fun dialogueForSpeech(item: SrtItem): String {
+        return item.cleanSpokenText.ifBlank { item.text }
+            .replace(Regex("^\\[.*?\\]:?\\s*"), "")
+            .replace(Regex("^\\(.*?\\)\\s*:?\\s*"), "")
+            .trim()
+    }
+
     /** Precomputes spoken text per cue so live speech has zero translation lag. */
     private fun buildSpeechTextCache(items: List<SrtItem>): Map<Int, String> {
         val hindiMode = _uiState.value.appLanguage == AppLanguage.HINDI ||
             _uiState.value.isOfflineHindiVoiceInSubtitles
         val map = LinkedHashMap<Int, String>(items.size)
         for (item in items) {
+            val dialogue = dialogueForSpeech(item)
             val spoken = if (!hindiMode) {
                 // Multi-language mode: speak subtitles in the selected language as-is.
-                item.cleanSpokenText.ifBlank { item.text }
-            } else if (isDevanagari(item.text)) {
-                item.text
+                dialogue.ifBlank { item.text }
+            } else if (isDevanagari(dialogue)) {
+                dialogue
             } else {
                 try {
-                    OfflineSubtitleEngine.translateLineToHindi(item.text)
+                    OfflineSubtitleEngine.translateLineToHindi(dialogue).ifBlank { dialogue }
                 } catch (_: Exception) {
-                    item.text
+                    dialogue
                 }
             }
             if (spoken.isNotBlank()) map[item.index] = spoken
@@ -491,7 +566,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                         lastSpokenSubtitleIndex = -1,
                         srtLanguageDetection = langDetection,
                         originalSrtBackup = rawText,
-                        isTranslatedWithGemini = false,
+                        isTranslatedToHindi = false,
                         showLanguageWarningBanner = !langDetection.isHindi && it.autoTranslateNonHindiOnLoad
                     )
                 }
@@ -500,12 +575,15 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                 if (!langDetection.isHindi && _uiState.value.autoTranslateNonHindiOnLoad) {
                     _uiState.update { it.copy(showAutoTranslatePromptDialog = true) }
                 }
+                // Fresh content: re-measure voice pace for subtitle↔voice matching.
+                calibrateVoiceTiming()
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to parse SRT: ${e.message}", e)
             }
         }
     }
 
+    /** 100% offline Hindi translation (no API key, no internet needed). */
     fun translateCurrentSrtToHindi(force: Boolean = false) {
         val currentSrt = _uiState.value.rawSrtText
         if (currentSrt.isBlank()) return
@@ -513,59 +591,12 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         _uiState.update {
             it.copy(
                 isTranslatingSrt = true,
-                translationProgressMessage = "Translating subtitles to Hindi...",
-                translationError = null,
                 showAutoTranslatePromptDialog = false
             )
         }
 
         viewModelScope.launch {
             try {
-                val customApiKey = _uiState.value.customGeminiApiKey.ifBlank { null }
-                val result = GeminiTranslator.translateSrtToHindi(currentSrt, customApiKey)
-
-                when (result) {
-                    is TranslationResult.Success -> {
-                        val translatedSrt = result.translatedSrt
-                        val newParsed = SrtParser.parse(translatedSrt)
-                        val newCache = try {
-                            withContext(Dispatchers.Default) { buildSpeechTextCache(newParsed) }
-                        } catch (_: Exception) { emptyMap() }
-                        _uiState.update {
-                            it.copy(
-                                rawSrtText = translatedSrt,
-                                parsedSubtitles = newParsed,
-                                speechTextCache = newCache,
-                                lastSpokenSubtitleIndex = -1,
-                                isTranslatingSrt = false,
-                                isTranslatedWithGemini = true,
-                                translationProgressMessage = "Translation complete!"
-                            )
-                        }
-                    }
-                    is TranslationResult.Error -> {
-                        // Seamless Fallback to high quality Offline Subtitle Engine
-                        Log.w(TAG, "Gemini translation failed: ${result.message}. Using Offline Subtitle Engine fallback.")
-                        val offlineHindiSrt = translateSrtOffline(currentSrt)
-                        val newParsed = SrtParser.parse(offlineHindiSrt)
-                        val newCache = try {
-                            withContext(Dispatchers.Default) { buildSpeechTextCache(newParsed) }
-                        } catch (_: Exception) { emptyMap() }
-                        _uiState.update {
-                            it.copy(
-                                rawSrtText = offlineHindiSrt,
-                                parsedSubtitles = newParsed,
-                                speechTextCache = newCache,
-                                lastSpokenSubtitleIndex = -1,
-                                isTranslatingSrt = false,
-                                isTranslatedWithGemini = false,
-                                translationProgressMessage = "Offline Hindi Translation applied!"
-                            )
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                // Fallback to offline
                 val offlineHindiSrt = translateSrtOffline(currentSrt)
                 val newParsed = SrtParser.parse(offlineHindiSrt)
                 val newCache = try {
@@ -578,9 +609,12 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                         speechTextCache = newCache,
                         lastSpokenSubtitleIndex = -1,
                         isTranslatingSrt = false,
-                        translationError = null
+                        isTranslatedToHindi = true
                     )
                 }
+            } catch (e: Exception) {
+                Log.e(TAG, "Offline translation failed: ${e.message}", e)
+                _uiState.update { it.copy(isTranslatingSrt = false) }
             }
         }
     }
@@ -607,27 +641,14 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                     parsedSubtitles = parsed,
                     speechTextCache = newCache,
                     lastSpokenSubtitleIndex = -1,
-                    isTranslatedWithGemini = false,
-                    translationError = null
+                    isTranslatedToHindi = false
                 )
             }
         }
     }
 
-    fun dismissTranslationError() {
-        _uiState.update { it.copy(translationError = null) }
-    }
-
-    fun setShowApiKeyDialog(show: Boolean) {
-        _uiState.update { it.copy(showApiKeyDialog = show) }
-    }
-
     fun setAutoTranslateNonHindiOnLoad(enabled: Boolean) {
         _uiState.update { it.copy(autoTranslateNonHindiOnLoad = enabled) }
-    }
-
-    fun setCustomGeminiApiKey(apiKey: String) {
-        _uiState.update { it.copy(customGeminiApiKey = apiKey.trim(), showApiKeyDialog = false) }
     }
 
     // --- Audio Mixer & Sound Controls ---
@@ -718,20 +739,14 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         // Pause: stop voice immediately so queued dialogues don't keep
         // speaking while the video is paused.
         if (wasPlaying) {
-            try {
-                tts?.stop()
-            } catch (_: Exception) {
-            }
+            flushTtsQueue()
         }
     }
 
     fun seekTo(positionMs: Long) {
         // Seek: flush stale queued speeches so voice restarts cleanly
         // at the new position instead of speaking old timeline.
-        try {
-            tts?.stop()
-        } catch (_: Exception) {
-        }
+        flushTtsQueue()
         val clamped = positionMs.coerceIn(0L, _uiState.value.videoDurationMs.coerceAtLeast(1000L))
         // pendingSeekMs bridges Compose state -> ExoPlayer.seekTo() in the surface view.
         _uiState.update { it.copy(pendingSeekMs = clamped) }
@@ -893,8 +908,88 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
     }
 
     fun stopSpeaking() {
-        tts?.stop()
+        flushTtsQueue()
         _uiState.update { it.copy(speechState = SpeechState.READY, previewingPersonaId = null) }
+    }
+
+    /**
+     * Voice-match calibration: synthesizes one short sample with the CURRENT
+     * device voice, measures the real WAV duration, and derives ms-per-char.
+     * Fully offline. Skipped while the engine is busy (keeps default pace).
+     */
+    private fun calibrateVoiceTiming() {
+        val engine = tts ?: return
+        if (!isTtsInitialized) return
+        if (_uiState.value.isVideoPlaying || ttsQueueDepth > 0) return
+        voiceCalibJob?.cancel()
+        voiceCalibJob = viewModelScope.launch(Dispatchers.IO) {
+            val wav = File(context.cacheDir, "voice_calib_${System.currentTimeMillis()}.wav")
+            try {
+                val sample = calibrationSample()
+                if (sample.isBlank()) return@launch
+                if (wav.exists()) wav.delete()
+                val done = suspendCancellableCoroutine { cont ->
+                    val calibId = "calib_${System.currentTimeMillis()}"
+                    engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                        override fun onStart(utteranceId: String?) {}
+                        override fun onDone(utteranceId: String?) {
+                            if (utteranceId == calibId && cont.isActive) cont.resume(true)
+                        }
+
+                        @Deprecated("Deprecated in Java")
+                        override fun onError(utteranceId: String?) {
+                            if (utteranceId == calibId && cont.isActive) cont.resume(false)
+                        }
+
+                        override fun onStop(utteranceId: String?, interrupted: Boolean) {
+                            if (utteranceId == calibId && cont.isActive) cont.resume(false)
+                        }
+                    })
+                    val rc = try {
+                        engine.synthesizeToFile(sample, null, wav, calibId)
+                    } catch (_: Exception) {
+                        TextToSpeech.ERROR
+                    }
+                    if (rc != TextToSpeech.SUCCESS && cont.isActive) cont.resume(false)
+                    cont.invokeOnCancellation {
+                        try {
+                            engine.stop()
+                        } catch (_: Exception) {
+                        }
+                    }
+                }
+                if (done) {
+                    val pcm = try {
+                        AudioExportHelper.readWavPcm(wav)
+                    } catch (_: Exception) {
+                        null
+                    }
+                    if (pcm != null && pcm.pcmBytes.isNotEmpty()) {
+                        val durMs = (pcm.pcmBytes.size * 1000L) /
+                            (pcm.sampleRate.coerceAtLeast(1) * pcm.channelCount.coerceAtLeast(1) * 2L)
+                        val pace = VoiceMatch.msPerCharFromCalibration(durMs, sample.length)
+                        _uiState.update { it.copy(voiceMsPerChar = pace) }
+                    }
+                }
+            } catch (_: Exception) {
+            } finally {
+                try {
+                    wav.delete()
+                } catch (_: Exception) {
+                }
+                attachTtsListener()
+            }
+        }
+    }
+
+    /** Short real-content sample for calibration (first dialogue preferred). */
+    private fun calibrationSample(): String {
+        val st = _uiState.value
+        val first = st.parsedSubtitles.firstOrNull()
+        val fromSubs = first?.let { (st.speechTextCache[it.index] ?: it.text).take(30) }?.trim()
+        if (!fromSubs.isNullOrBlank()) return fromSubs
+        return if (st.appLanguage == AppLanguage.HINDI) "नमस्ते दोस्तों स्वागत है"
+        else "Hello friends welcome"
     }
 
     fun speakText(text: String) {
@@ -904,6 +999,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
     // --- Multi-language Subtitle Reader (standalone, works with/without video) ---
 
     private var subtitleReaderJob: Job? = null
+    private var voiceCalibJob: Job? = null
 
     fun showOfflineSubtitleReaderDialog(show: Boolean) {
         _uiState.update { it.copy(showOfflineSubtitleReaderDialog = show) }
@@ -962,10 +1058,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
     fun stopSubtitleReader(keepStatus: Boolean = false) {
         subtitleReaderJob?.cancel()
         subtitleReaderJob = null
-        try {
-            tts?.stop()
-        } catch (_: Exception) {
-        }
+        flushTtsQueue()
         _uiState.update { it.copy(isSubtitleReaderPlaying = false) }
         if (!keepStatus) {
             _uiState.update { it.copy(statusMessage = "Subtitle reader stopped") }
@@ -1114,10 +1207,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
 
     fun selectDeviceVideo(video: MxVideoItem) {
         // New video: clear old queued voice before starting fresh.
-        try {
-            tts?.stop()
-        } catch (_: Exception) {
-        }
+        flushTtsQueue()
         _uiState.update {
             it.copy(
                 videoUri = video.uriString,
@@ -1325,10 +1415,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
     fun togglePreferOfflineVoice() {
         val next = !_uiState.value.preferOfflineVoice
         _uiState.update { it.copy(preferOfflineVoice = next) }
-        try {
-            tts?.stop()
-        } catch (_: Exception) {
-        }
+        flushTtsQueue()
         ensureOfflineVoiceApplied(_uiState.value)
         _uiState.update {
             it.copy(
@@ -1443,7 +1530,9 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         if (!state.isDynamicRateAutoFitEnabled) return base.coerceIn(0.5f, 2.0f)
         val windowMs = (cue.endTimeMs - cue.startTimeMs - state.dialogueLeadTimeMs).coerceAtLeast(800L)
         val neededCps = speechText.length / (windowMs / 1000f)
-        return (base * (neededCps / 14f).coerceIn(0.9f, 1.15f)).coerceIn(0.5f, 2.0f)
+        // Offline engines (eSpeak/Pico) clip and drop words above ~1.05x,
+        // so auto-fit barely bends the rate instead of rushing speech.
+        return (base * (neededCps / 14f).coerceIn(0.9f, 1.05f)).coerceIn(0.5f, 2.0f)
     }
 
     // --- Video Export with Hindi dubbing ---
@@ -1605,10 +1694,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                 }
                 if (rc != TextToSpeech.SUCCESS && cont.isActive) cont.resume(false)
                 cont.invokeOnCancellation {
-                    try {
-                        ttsInstance.stop()
-                    } catch (_: Exception) {
-                    }
+                    flushTtsQueue()
                 }
             }
         } catch (_: Exception) {
@@ -1622,7 +1708,8 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         playbackTrackingJob?.cancel()
         speechSynthesisJob?.cancel()
         subtitleReaderJob?.cancel()
-        tts?.stop()
+        voiceCalibJob?.cancel()
+        flushTtsQueue()
         tts?.shutdown()
         bgmAudioEngine.stop()
     }

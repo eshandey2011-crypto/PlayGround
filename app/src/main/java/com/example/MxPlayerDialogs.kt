@@ -129,7 +129,7 @@ fun MxVideoInfoDialog(
                     "Audio Track 2",
                     "AI Dubbing (${if (uiState.isAutoDubbingEnabled) "Active" else "Muted"})"
                 )
-                InfoRow("Subtitle Track", "${uiState.parsedSubtitles.size} dialogue lines (${if (uiState.isTranslatedWithGemini) "Gemini AI" else "Standard"})")
+                InfoRow("Subtitle Track", "${uiState.parsedSubtitles.size} dialogue lines (${if (uiState.isTranslatedToHindi) "Offline Hindi" else "Standard"})")
                 InfoRow("Playback Speed", "${uiState.playbackSpeed}x")
                 InfoRow("Volume Boost", "${uiState.volumeBoostPercent}%")
             }
@@ -670,7 +670,7 @@ fun MxFriendlyHelpDialog(
                         }
                         Spacer(modifier = Modifier.height(6.dp))
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            HelpFeatureRow("• Gemini Translation", "English SRT subtitles automatically translate accurately")
+                            HelpFeatureRow("• Offline Translation", "English SRT subtitles translate on-device, no internet needed")
                             HelpFeatureRow("• 4 AI Voice Characters", "Choose between Rohan, Priya, Aarav, and Kavya personas")
                             HelpFeatureRow("• BGM & Voice Mixer", "Balance background music and voice dialogue to your liking")
                             HelpFeatureRow("• Auto-Save Project", "Your video progress and settings are always safely saved")
