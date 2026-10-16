@@ -279,6 +279,13 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
 """.trimIndent()
             loadSrtText(defaultSrt, "welcome_demo.srt")
 
+            // Load subtitle history from Room (reload previous .srt files quickly)
+            launch {
+                srtHistoryRepo.allHistory.collect { history ->
+                    _uiState.update { it.copy(srtHistoryList = history) }
+                }
+            }
+
             // Load saved projects from Room
             dubbingProjectRepo.allProjects.collect { projects ->
                 _uiState.update { it.copy(savedProjects = projects) }
@@ -312,9 +319,9 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         val state = _uiState.value
         val effectivePosition = positionMs + state.soundTrackSyncDelayMs
         val parsed = state.parsedSubtitles
-        // Lead-time pre-roll: start speaking slightly BEFORE the cue appears
-        // so voice lands on time instead of lagging behind video.
-        val leadMs = state.dialogueLeadTimeMs.coerceIn(0L, 2000L)
+        // Lead-time pre-roll: voice starts 3 sec BEFORE the cue appears,
+        // and must finish before the paragraph ends.
+        val leadMs = state.dialogueLeadTimeMs.coerceIn(0L, 5000L)
 
         // Find active subtitle cue (lead window for voice, exact window for display)
         val activeCue = parsed.firstOrNull { cue ->
@@ -377,6 +384,14 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                 }
                 if (targetText.isBlank()) return@launch
 
+                // Staleness guard (live dubbing only): video agar is cue ke
+                // end se bahut aage nikal gaya ho to purani timeline mat bolo —
+                // isse queue me backlog nahi jamta. Current dialogue hamesha
+                // poora bolega. (Reader mode me guard nahi lagta.)
+                if (state.isVideoPlaying && !state.isSubtitleReaderPlaying) {
+                    if (state.videoPositionMs > cue.endTimeMs + 1500L) return@launch
+                }
+
                 // Persona pitch + speed (shared with export synthesis).
                 val pitch = pitchForCue(cue, state)
                 val baseSpeed = rateForCue(cue, state, targetText)
@@ -385,8 +400,9 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                 ttsInstance.setSpeechRate(baseSpeed)
 
                 val utteranceId = "cue_${cue.index}_${System.currentTimeMillis()}"
-                // QUEUE_ADD: every dialogue speaks FULLY without cutting the
-                // previous one; 1-sec pre-roll keeps it matched to timeline.
+                // QUEUE_ADD: har dialogue POORA bolega, beech me nahi katega.
+                // 3-sec pre-roll + finish-before-end rate se timeline match rehta hai;
+                // stale guard upar backlog rokta hai taaki awaaz late na ho.
                 ttsInstance.speak(targetText, TextToSpeech.QUEUE_ADD, null, utteranceId)
             } catch (e: Exception) {
                 Log.e(TAG, "Error in speakSubtitleCue: ${e.message}", e)
@@ -499,6 +515,23 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                 // If non-Hindi and auto translate enabled, prompt or translate
                 if (!langDetection.isHindi && _uiState.value.autoTranslateNonHindiOnLoad) {
                     _uiState.update { it.copy(showAutoTranslatePromptDialog = true) }
+                }
+
+                // Log to subtitle history (Room) for quick reload later.
+                try {
+                    val snap = _uiState.value
+                    srtHistoryRepo.recordHistory(
+                        fileName = snap.currentSrtFileName ?: fileName ?: "subtitles.srt",
+                        sourceType = SrtHistorySource.IMPORTED,
+                        rawContent = rawText,
+                        cueCount = parsedItems.size,
+                        durationMs = parsedItems.maxOfOrNull { it.endTimeMs } ?: 0L,
+                        languageCode = snap.appLanguage.code,
+                        formatName = format.name,
+                        videoTitle = snap.videoTitle,
+                        videoUri = snap.videoUri
+                    )
+                } catch (_: Exception) {
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to parse SRT: ${e.message}", e)
@@ -758,13 +791,19 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
     }
 
     // --- Subtitle Synchronization ---
+    // Single effective offset, mirrored in both fields: the sync panel/slider
+    // UI reads subtitleOffsetMs, the speak path reads soundTrackSyncDelayMs.
 
     fun setSubtitleOffset(offsetMs: Long) {
-        _uiState.update { it.copy(soundTrackSyncDelayMs = offsetMs) }
+        val clamped = offsetMs.coerceIn(-10000L, 10000L)
+        _uiState.update { it.copy(soundTrackSyncDelayMs = clamped, subtitleOffsetMs = clamped) }
     }
 
     fun adjustSubtitleOffset(deltaMs: Long) {
-        _uiState.update { it.copy(soundTrackSyncDelayMs = it.soundTrackSyncDelayMs + deltaMs) }
+        _uiState.update {
+            val next = (it.soundTrackSyncDelayMs + deltaMs).coerceIn(-10000L, 10000L)
+            it.copy(soundTrackSyncDelayMs = next, subtitleOffsetMs = next)
+        }
     }
 
     fun alignSubtitleToCurrentPosition() {
@@ -780,7 +819,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
 
     fun lockSameToSameSync() {
         // Fast reset and calibration
-        setSubtitleOffset(0L)
+        _uiState.update { it.copy(soundTrackSyncDelayMs = 0L, subtitleOffsetMs = 0L) }
     }
 
     // --- Subtitle Appearance & Dialogs ---
@@ -1280,6 +1319,112 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         _uiState.update { it.copy(showSubtitleSyncDialog = show) }
     }
 
+    fun showSrtHistoryDialog(show: Boolean) {
+        _uiState.update { it.copy(showSrtHistoryDialog = show) }
+    }
+
+    /** Reload a subtitle file from history. */
+    fun loadHistoryEntry(entry: SrtHistoryEntity) {
+        viewModelScope.launch {
+            try {
+                srtHistoryRepo.touchHistory(entry.id)
+            } catch (_: Exception) {
+            }
+            _uiState.update { it.copy(showSrtHistoryDialog = false) }
+            loadSrtText(entry.rawContent, entry.fileName)
+        }
+    }
+
+    fun deleteHistoryEntry(entry: SrtHistoryEntity) {
+        viewModelScope.launch {
+            try {
+                srtHistoryRepo.deleteHistory(entry.id)
+            } catch (e: Exception) {
+                Log.e(TAG, "Delete history failed: ${e.message}", e)
+            }
+        }
+    }
+
+    fun clearSrtHistory() {
+        viewModelScope.launch {
+            try {
+                srtHistoryRepo.clearAll()
+            } catch (e: Exception) {
+                Log.e(TAG, "Clear history failed: ${e.message}", e)
+            }
+        }
+    }
+
+    // --- Subtitle file Save / Share ---
+
+    private fun currentSubtitleContent(): String {
+        val st = _uiState.value
+        return try {
+            SubtitleExportHelper.getFormattedSubtitles(
+                st.parsedSubtitles, st.rawSrtText, st.detectedSubtitleFormat
+            )
+        } catch (_: Exception) {
+            st.rawSrtText
+        }
+    }
+
+    /** Save loaded subtitles as .srt into Downloads (MediaStore, no permission needed). */
+    fun saveLoadedSubtitlesToDownloads() {
+        val st = _uiState.value
+        val content = currentSubtitleContent()
+        if (content.isBlank()) {
+            _uiState.update { it.copy(statusMessage = "No subtitles loaded — pehle Add Subtitle karo") }
+            return
+        }
+        viewModelScope.launch {
+            val (ok, msg) = try {
+                withContext(Dispatchers.IO) {
+                    SubtitleExportHelper.saveToDownloads(
+                        context,
+                        st.currentSrtFileName ?: "subtitles.srt",
+                        content
+                    )
+                }
+            } catch (e: Exception) {
+                Pair(false, "Save failed: ${e.message}")
+            }
+            _uiState.update { it.copy(statusMessage = msg) }
+            if (ok) {
+                try {
+                    srtHistoryRepo.recordHistory(
+                        fileName = st.currentSrtFileName ?: "subtitles.srt",
+                        sourceType = SrtHistorySource.EXPORTED,
+                        rawContent = content,
+                        cueCount = st.parsedSubtitles.size,
+                        languageCode = st.appLanguage.code,
+                        formatName = st.detectedSubtitleFormat.name
+                    )
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    /** Share loaded subtitles via system share sheet. */
+    fun shareLoadedSubtitles() {
+        val st = _uiState.value
+        val content = currentSubtitleContent()
+        if (content.isBlank()) {
+            _uiState.update { it.copy(statusMessage = "No subtitles loaded — pehle Add Subtitle karo") }
+            return
+        }
+        try {
+            SubtitleExportHelper.shareSubtitles(
+                context,
+                st.videoTitle,
+                content,
+                st.currentSrtFileName ?: "subtitles.srt"
+            )
+        } catch (e: Exception) {
+            _uiState.update { it.copy(statusMessage = "Share failed: ${e.message}") }
+        }
+    }
+
     fun showLanguageSelectorDialog(show: Boolean) {
         _uiState.update { it.copy(showLanguageSelectorDialog = show) }
     }
@@ -1311,7 +1456,8 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
     }
 
     fun setSoundTrackSyncDelayMs(delayMs: Long) {
-        _uiState.update { it.copy(soundTrackSyncDelayMs = delayMs.coerceIn(-5000L, 5000L)) }
+        val clamped = delayMs.coerceIn(-5000L, 5000L)
+        _uiState.update { it.copy(soundTrackSyncDelayMs = clamped, subtitleOffsetMs = clamped) }
     }
 
     fun toggleVocalClarityBoost() {
@@ -1352,9 +1498,9 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         _uiState.update { it.copy(showPerfectTimingDialog = show) }
     }
 
-    /** Voice pre-roll (0–2000ms). Directly drives the speak-ahead window. */
+    /** Voice pre-roll (0–5000ms). 3000ms = voice starts 3 sec before subtitle. */
     fun setDialogueLeadTimeMs(leadMs: Long) {
-        _uiState.update { it.copy(dialogueLeadTimeMs = leadMs.coerceIn(0L, 2000L)) }
+        _uiState.update { it.copy(dialogueLeadTimeMs = leadMs.coerceIn(0L, 5000L)) }
     }
 
     fun togglePerfectTiming(enabled: Boolean) {
@@ -1362,7 +1508,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
             it.copy(
                 isPerfectTimingEnabled = enabled,
                 dialogueLeadTimeMs = if (enabled) {
-                    if (it.dialogueLeadTimeMs <= 0L) 1000L else it.dialogueLeadTimeMs
+                    if (it.dialogueLeadTimeMs <= 0L) 3000L else it.dialogueLeadTimeMs
                 } else 0L
             )
         }
@@ -1376,7 +1522,8 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         _uiState.update {
             it.copy(
                 soundTrackSyncDelayMs = 0L,
-                dialogueLeadTimeMs = 1000L,
+                subtitleOffsetMs = 0L,
+                dialogueLeadTimeMs = 3000L,
                 isPerfectTimingEnabled = true,
                 lastSpokenSubtitleIndex = -1
             )
@@ -1434,16 +1581,27 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
     }
 
     /**
-     * Per-cue speech rate. When dynamic auto-fit is on, the rate bends only
-     * slightly (max +15%) so long dialogues stay understandable — never
-     * chipmunk-fast. QUEUE_ADD lets overflow finish instead of rushing.
+     * Per-cue speech rate. Speaking window = cue duration + 3-sec pre-roll.
+     * Hindi (Devanagari) lines speak at FULL speed (1.5x) so poora dialogue
+     * jaldi aur saaf samajh aaye; other languages use the normal fitted rate.
      */
     private fun rateForCue(cue: SrtItem, state: TtsUiState, speechText: String): Float {
         val base = speedForState(state)
-        if (!state.isDynamicRateAutoFitEnabled) return base.coerceIn(0.5f, 2.0f)
-        val windowMs = (cue.endTimeMs - cue.startTimeMs - state.dialogueLeadTimeMs).coerceAtLeast(800L)
-        val neededCps = speechText.length / (windowMs / 1000f)
-        return (base * (neededCps / 14f).coerceIn(0.9f, 1.15f)).coerceIn(0.5f, 2.0f)
+        val fitted = if (!state.isDynamicRateAutoFitEnabled) {
+            base
+        } else {
+            val leadMs = state.dialogueLeadTimeMs.coerceIn(0L, 5000L)
+            val windowMs = (cue.endTimeMs - cue.startTimeMs + leadMs).coerceAtLeast(1500L)
+            val neededCps = speechText.length / (windowMs / 1000f)
+            base * (neededCps / 14f).coerceIn(0.9f, 1.5f)
+        }
+        val isHindiLine = speechText.any { it in '\u0900'..'\u097F' }
+        return if (isHindiLine) {
+            fitted.coerceAtLeast(state.hindiFullSpeedMultiplier.coerceIn(0.5f, 2.0f))
+                .coerceIn(0.5f, 2.0f)
+        } else {
+            fitted.coerceIn(0.5f, 2.0f)
+        }
     }
 
     // --- Video Export with Hindi dubbing ---

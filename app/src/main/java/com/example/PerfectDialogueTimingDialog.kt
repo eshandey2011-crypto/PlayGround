@@ -222,9 +222,9 @@ fun PerfectDialogueTimingDialog(
                             }
 
                             Slider(
-                                value = leadTime.toFloat().coerceIn(0f, 400f),
+                                value = leadTime.toFloat().coerceIn(0f, 5000f),
                                 onValueChange = { onLeadTimeChange(it.toLong()) },
-                                valueRange = 0f..400f,
+                                valueRange = 0f..5000f,
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .testTag("dialogue_lead_time_slider"),
@@ -241,10 +241,10 @@ fun PerfectDialogueTimingDialog(
                             ) {
                                 val presets = listOf(
                                     0L to "0ms (Same)",
-                                    60L to "60ms",
-                                    120L to "120ms (Ideal)",
-                                    180L to "180ms",
-                                    250L to "250ms (BT)"
+                                    1000L to "1s",
+                                    2000L to "2s",
+                                    3000L to "3s (Default)",
+                                    5000L to "5s"
                                 )
                                 presets.forEach { (ms, label) ->
                                     val isSelected = leadTime == ms
@@ -277,36 +277,36 @@ fun PerfectDialogueTimingDialog(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 OutlinedButton(
-                                    onClick = { onLeadTimeChange((leadTime - 50L).coerceAtLeast(0L)) },
+                                    onClick = { onLeadTimeChange((leadTime - 500L).coerceAtLeast(0L)) },
                                     modifier = Modifier.weight(1f),
                                     shape = RoundedCornerShape(8.dp),
                                     contentPadding = PaddingValues(2.dp)
                                 ) {
-                                    Text("-50ms", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                    Text("-500ms", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                                 }
                                 OutlinedButton(
-                                    onClick = { onLeadTimeChange((leadTime - 20L).coerceAtLeast(0L)) },
+                                    onClick = { onLeadTimeChange((leadTime - 100L).coerceAtLeast(0L)) },
                                     modifier = Modifier.weight(1f),
                                     shape = RoundedCornerShape(8.dp),
                                     contentPadding = PaddingValues(2.dp)
                                 ) {
-                                    Text("-20ms", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                    Text("-100ms", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                                 }
                                 OutlinedButton(
-                                    onClick = { onLeadTimeChange((leadTime + 20L).coerceAtMost(400L)) },
+                                    onClick = { onLeadTimeChange((leadTime + 100L).coerceAtMost(5000L)) },
                                     modifier = Modifier.weight(1f),
                                     shape = RoundedCornerShape(8.dp),
                                     contentPadding = PaddingValues(2.dp)
                                 ) {
-                                    Text("+20ms", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                    Text("+100ms", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                                 }
                                 OutlinedButton(
-                                    onClick = { onLeadTimeChange((leadTime + 50L).coerceAtMost(400L)) },
+                                    onClick = { onLeadTimeChange((leadTime + 500L).coerceAtMost(5000L)) },
                                     modifier = Modifier.weight(1f),
                                     shape = RoundedCornerShape(8.dp),
                                     contentPadding = PaddingValues(2.dp)
                                 ) {
-                                    Text("+50ms", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                    Text("+500ms", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                                 }
                             }
                         }

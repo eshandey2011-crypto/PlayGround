@@ -724,9 +724,36 @@ fun MainAppScreen(
                     onAdjustOffset = { ttsViewModel.adjustSubtitleOffset(it) },
                     onResetOffset = { ttsViewModel.setSubtitleOffset(0L) },
                     onClose = { ttsViewModel.showSubtitleSyncSlider(false) },
-                    onOpenFullDialog = { ttsViewModel.showSubtitleSyncSlider(false) }
+                    onOpenFullDialog = {
+                        ttsViewModel.showSubtitleSyncSlider(false)
+                        ttsViewModel.showSubtitleSyncDialog(true)
+                    }
                 )
             }
+        )
+    }
+
+    if (uiState.showSubtitleSyncDialog) {
+        AlertDialog(
+            onDismissRequest = { ttsViewModel.showSubtitleSyncDialog(false) },
+            confirmButton = {},
+            text = {
+                SubtitleSyncSettingsPanel(
+                    uiState = uiState,
+                    viewModel = ttsViewModel,
+                    onClose = { ttsViewModel.showSubtitleSyncDialog(false) }
+                )
+            }
+        )
+    }
+
+    if (uiState.showSrtHistoryDialog) {
+        SrtHistoryDialog(
+            entries = uiState.srtHistoryList,
+            onLoadEntry = { ttsViewModel.loadHistoryEntry(it) },
+            onDeleteEntry = { ttsViewModel.deleteHistoryEntry(it) },
+            onClearAll = { ttsViewModel.clearSrtHistory() },
+            onDismiss = { ttsViewModel.showSrtHistoryDialog(false) }
         )
     }
 

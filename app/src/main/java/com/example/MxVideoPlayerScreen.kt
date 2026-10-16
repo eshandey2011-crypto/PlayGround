@@ -847,6 +847,46 @@ fun MxPlayerSurfaceBox(
                                 leadingIcon = { Icon(Icons.Default.SyncAlt, contentDescription = null) }
                             )
                             DropdownMenuItem(
+                                text = { Text("Subtitle Sync (Full)") },
+                                onClick = {
+                                    showPlayerMenu = false
+                                    ttsViewModel.showSubtitleSyncDialog(true)
+                                },
+                                leadingIcon = { Icon(Icons.Default.Tune, contentDescription = null) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Subtitle History") },
+                                onClick = {
+                                    showPlayerMenu = false
+                                    ttsViewModel.showSrtHistoryDialog(true)
+                                },
+                                leadingIcon = { Icon(Icons.Default.History, contentDescription = null) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Save Subtitles (.srt)") },
+                                onClick = {
+                                    showPlayerMenu = false
+                                    ttsViewModel.saveLoadedSubtitlesToDownloads()
+                                },
+                                leadingIcon = { Icon(Icons.Default.Download, contentDescription = null) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Share Subtitles") },
+                                onClick = {
+                                    showPlayerMenu = false
+                                    ttsViewModel.shareLoadedSubtitles()
+                                },
+                                leadingIcon = { Icon(Icons.Default.Share, contentDescription = null) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(if (uiState.isLoopModeEnabled) "Loop: ON" else "Loop: OFF") },
+                                onClick = {
+                                    showPlayerMenu = false
+                                    ttsViewModel.toggleLoopMode()
+                                },
+                                leadingIcon = { Icon(Icons.Default.Repeat, contentDescription = null) }
+                            )
+                            DropdownMenuItem(
                                 text = { Text("Audio Tracks & Sound") },
                                 onClick = {
                                     showPlayerMenu = false
