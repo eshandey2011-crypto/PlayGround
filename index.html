@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SRT Video Player — Android App</title>
+<style>
+  :root { color-scheme: dark; --bg:#0b1020; --card:#151d33; --accent:#4f8cff; --txt:#e8edf7; --mut:#9aa7c2; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, Roboto, "Noto Sans", sans-serif; background:var(--bg); color:var(--txt); }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 32px 20px 60px; }
+  .badge { display:inline-block; background:#12325e; color:#9cc2ff; border:1px solid #2c5cab; padding:4px 12px; border-radius:999px; font-size:13px; }
+  h1 { font-size: 2rem; margin: 14px 0 6px; }
+  p.sub { color: var(--mut); margin-top:0; }
+  .grid { display:grid; grid-template-columns: repeat(auto-fit,minmax(240px,1fr)); gap:12px; margin:20px 0; }
+  .card { background:var(--card); border:1px solid #26324f; border-radius:14px; padding:14px 16px; }
+  .card b { display:block; margin-bottom:4px; }
+  .card span { color:var(--mut); font-size:14px; }
+  .btnrow { display:flex; gap:10px; flex-wrap:wrap; margin:18px 0; }
+  a.btn { background:var(--accent); color:#fff; text-decoration:none; padding:12px 20px; border-radius:10px; font-weight:600; }
+  a.btn.ghost { background:transparent; border:1px solid var(--accent); color:#9cc2ff; }
+  code, pre { background:#0a0f1f; border:1px solid #26324f; border-radius:8px; }
+  code { padding:2px 6px; }
+  pre { padding:12px 14px; overflow:auto; font-size:13px; }
+  footer { color:var(--mut); font-size:13px; margin-top:28px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <span class="badge">Android • Jetpack Compose • Media3 ExoPlayer</span>
+  <h1>🎬 SRT Video Player</h1>
+  <p class="sub">Smart SRT video player — multi-language subtitle voice, offline TTS narration, subtitle sync, gestures, folder browser, video export.</p>
+
+  <div class="btnrow">
+    <a class="btn" href="app/build/outputs/apk/debug/app-debug.apk">⬇ Debug APK download (28 MB)</a>
+    <a class="btn ghost" href="https://github.com/eshandey2011-crypto/PlayGround">💻 Source on GitHub</a>
+  </div>
+
+  <div class="grid">
+    <div class="card"><b>🗣 Hindi TTS narration</b><span>Offline subtitle speech, Hindi voice profiles, dubbing projects (Room DB).</span></div>
+    <div class="card"><b>🔤 Subtitle sync</b><span>Slider + ms offset, timeline sync service, copy subtitles, appearance settings.</span></div>
+    <div class="card"><b>👆 Gestures &amp; speed</b><span>Swipe seek / volume / brightness, speed menu, orientation lock.</span></div>
+    <div class="card"><b>📁 Folder browser</b><span>Folder browser + local media scanner, history, Room cache.</span></div>
+    <div class="card"><b>🤖 Gemini translate</b><span>Auto-translate subtitles via Gemini (<code>GEMINI_API_KEY</code> in <code>.env</code>).</span></div>
+    <div class="card"><b>🎞 Video export</b><span>Burn Hindi subtitles into video, frame capture, BGM mixer.</span></div>
+  </div>
+
+  <h2>Build (verified ✅)</h2>
+  <pre>export ANDROID_HOME=/usr/local/lib/android/sdk
+cp .env.example .env   # set GEMINI_API_KEY
+# debug.keystore already included for local builds
+gradle :app:assembleDebug
+# APK: app/build/outputs/apk/debug/app-debug.apk (28 MB)</pre>
+  <p class="sub">Verified: <code>assembleDebug</code> succeeds on JDK 17, compileSdk/targetSdk 36, minSdk 24, package <code>com.aistudio.srtplayer.qxpvlt</code> v1.0.</p>
+
+  <h2>Run in Android Studio</h2>
+  <pre>1. Open this folder in Android Studio
+2. Create .env with GEMINI_API_KEY (see .env.example)
+3. Remove debug signingConfig line per README step 5 (AI Studio only)
+4. Run on emulator / device</pre>
+
+  <footer>Web preview sirf jaankari ke liye hai — poora app Android source me hai (<code>app/src/main/java/com/example/</code>, 50+ Kotlin files). APK upar link se download karo.</footer>
+</div>
+</body>
+</html>
