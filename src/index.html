@@ -1,0 +1,573 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#070b16">
+  <title>SRT Video Player — Smart subtitles &amp; Hindi dubbing</title>
+  <meta name="description" content="A cinematic video player with bilingual SRT subtitles, sync controls, offline Hindi text-to-speech and a beautiful local library.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230066ff'/%3E%3Cpath d='M25 19l21 13-21 13z' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app-shell" id="app" data-ready="false">
+  <div class="ambient" aria-hidden="true">
+    <span class="orb orb-a"></span>
+    <span class="orb orb-b"></span>
+    <span class="orb orb-c"></span>
+    <span class="grid-light"></span>
+  </div>
+
+  <svg class="sprite" aria-hidden="true">
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l11-6.5z"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 6.5A2.5 2.5 0 0 1 5.5 4h4l2 2.5h7A2.5 2.5 0 0 1 21 9v7.5A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"/></symbol>
+    <symbol id="i-headphones" viewBox="0 0 24 24"><path d="M4 13v-1a8 8 0 0 1 16 0v1"/><rect x="3" y="13" width="4" height="7" rx="2"/><rect x="17" y="13" width="4" height="7" rx="2"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></symbol>
+    <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.6 9a2.6 2.6 0 1 1 3.6 2.4c-.8.4-1.2 1-1.2 1.8v.3"/><circle cx="12" cy="17" r=".9" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5 5"/></symbol>
+    <symbol id="i-camera" viewBox="0 0 24 24"><path d="M4 8h3l1.5-2h7L17 8h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></symbol>
+    <symbol id="i-cc" viewBox="0 0 24 24"><rect x="2.5" y="5" width="19" height="14" rx="3"/><path d="M10 10.2a3 3 0 1 0 0 3.6M18 10.2a3 3 0 1 0 0 3.6"/></symbol>
+    <symbol id="i-back10" viewBox="0 0 24 24"><path d="M4 5v5h5"/><path d="M5.2 14a7 7 0 1 0 2-6.3L4 10"/><text x="12" y="15.3" font-size="6.4" font-family="Inter,sans-serif" font-weight="700" fill="currentColor" stroke="none" text-anchor="middle">10</text></symbol>
+    <symbol id="i-fwd10" viewBox="0 0 24 24"><path d="M20 5v5h-5"/><path d="M18.8 14a7 7 0 1 1-2-6.3L20 10"/><text x="12" y="15.3" font-size="6.4" font-family="Inter,sans-serif" font-weight="700" fill="currentColor" stroke="none" text-anchor="middle">10</text></symbol>
+    <symbol id="i-volume" viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5v14L7.5 14.5H4z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/></symbol>
+    <symbol id="i-mute" viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5v14L7.5 14.5H4z"/><path d="M16 9.5l5 5M21 9.5l-5 5"/></symbol>
+    <symbol id="i-fullscreen" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5M5 16v3.5h14V16"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v12M7 11l5 5 5-5M5 20h14"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.6" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-sync" viewBox="0 0 24 24"><path d="M4 10a8 8 0 0 1 13.6-4.6L20 8"/><path d="M20 4v4h-4M20 14a8 8 0 0 1-13.6 4.6L4 16"/><path d="M4 20v-4h4"/></symbol>
+    <symbol id="i-tune" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2.2"/><circle cx="7" cy="17" r="2.2"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path d="M5 19l1-4L17 4l3 3L9 18z"/><path d="M14 7l3 3"/></symbol>
+    <symbol id="i-mail" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M4 7l8 6 8-6"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l8 3v5c0 5-3.4 8.4-8 10-4.6-1.6-8-5-8-10V6z"/><path d="M8.5 12l2.4 2.4 4.6-4.8"/></symbol>
+    <symbol id="i-star" viewBox="0 0 24 24"><path d="M12 3.5l2.6 5.4 5.9.8-4.3 4.2 1 5.9-5.2-2.8-5.2 2.8 1-5.9-4.3-4.2 5.9-.8z"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
+    <symbol id="i-translate" viewBox="0 0 24 24"><path d="M4 6h9M8.5 4v2M6 6c.8 4 3 7 6 9M12 6c-.8 4-3 7-6 9M14 20l4-10 4 10M15.5 16.5h5"/></symbol>
+    <symbol id="i-wave" viewBox="0 0 24 24"><path d="M3 12h2l1.5-5 2 10L10 4l2 16 2-12 2 8 1.5-4H21"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
+    <symbol id="i-skip" viewBox="0 0 24 24"><path d="M6 5l9 7-9 7zM18 5v14"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1.2" fill="currentColor" stroke="none"/><circle cx="4.5" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="4.5" cy="18" r="1.2" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-speaker" viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5v14L7.5 14.5H4z"/><path d="M15.5 9a4 4 0 0 1 0 6"/></symbol>
+  </svg>
+
+  <header class="topbar">
+    <a class="brand" href="#" id="brandHome" aria-label="SRT Video Player home">
+      <span class="brand-mark"><svg class="ico"><use href="#i-play"></use></svg></span>
+      <span class="brand-text">
+        <strong data-i18n="appTitle">SRT Video Player</strong>
+        <small data-i18n="tagline">Smart subtitles · Hindi dubbing</small>
+      </span>
+    </a>
+
+    <nav class="desktop-nav" aria-label="Primary">
+      <button class="nav-pill" data-screen="local">
+        <svg class="ico"><use href="#i-folder"></use></svg><span data-i18n="navLocal">Local</span><span class="nav-count">3</span>
+      </button>
+      <button class="nav-pill is-active" data-screen="player">
+        <svg class="ico"><use href="#i-play"></use></svg><span data-i18n="navPlayer">Player</span>
+      </button>
+      <button class="nav-pill" data-screen="tts">
+        <svg class="ico"><use href="#i-headphones"></use></svg><span data-i18n="navTts">Subtitle TTS</span>
+      </button>
+    </nav>
+
+    <div class="topbar-actions">
+      <button class="lang-btn" id="langToggle" title="Switch language" aria-label="Switch language">
+        <svg class="ico"><use href="#i-translate"></use></svg><span id="langLabel">EN</span>
+      </button>
+      <button class="icon-btn" id="themeToggle" title="Toggle theme" aria-label="Toggle theme">
+        <svg class="ico theme-moon"><use href="#i-moon"></use></svg>
+        <svg class="ico theme-sun"><use href="#i-sun"></use></svg>
+      </button>
+      <button class="icon-btn" id="helpBtn" title="Help" aria-label="Help">
+        <svg class="ico"><use href="#i-help"></use></svg>
+      </button>
+      <div class="avatar" aria-hidden="true">SR</div>
+    </div>
+  </header>
+
+  <main class="stage">
+    <section class="screen is-active" id="screen-player" data-screen-panel="player">
+      <div class="player-grid">
+        <div class="player-main">
+          <article class="player-card">
+            <div class="player-frame" id="playerFrame">
+              <video id="video" poster="assets/dawn.jpg" muted playsinline loop preload="auto">
+                <source src="assets/dawn.mp4" type="video/mp4">
+              </video>
+              <div class="video-tint" aria-hidden="true"></div>
+
+              <div class="frame-top">
+                <span class="live-chip"><span class="dot"></span><span data-i18n="nowPlaying">Now playing</span></span>
+                <div class="frame-top-actions">
+                  <span class="quality-chip">HD · 720p</span>
+                  <button class="glass-icon" id="shotBtn" title="Capture frame" aria-label="Capture frame">
+                    <svg class="ico"><use href="#i-camera"></use></svg>
+                  </button>
+                  <button class="glass-icon is-on" id="ccTopBtn" title="Toggle subtitles" aria-label="Toggle subtitles">
+                    <svg class="ico"><use href="#i-cc"></use></svg>
+                  </button>
+                </div>
+              </div>
+
+              <div class="subtitle-wrap" id="subtitleWrap">
+                <div class="subtitle-pill" id="subtitlePill">
+                  <p class="sub-line sub-en" id="subEn">The first light touches the Himalayan peaks.</p>
+                  <p class="sub-line sub-hi" id="subHi">पहली किरण हिमालय की चोटियों को छूती है।</p>
+                </div>
+              </div>
+
+              <button class="center-play" id="centerPlay" aria-label="Play video">
+                <svg class="ico"><use href="#i-play"></use></svg>
+              </button>
+
+              <div class="frame-controls">
+                <div class="timeline" id="timeline" role="slider" tabindex="0" aria-label="Seek" aria-valuemin="0" aria-valuemax="18" aria-valuenow="0">
+                  <div class="timeline-buffer" id="timelineBuffer"></div>
+                  <div class="timeline-fill" id="timelineFill"></div>
+                  <div class="timeline-knob" id="timelineKnob"></div>
+                </div>
+                <div class="control-row">
+                  <div class="control-group">
+                    <button class="ctrl-btn ctrl-main" id="playPause" aria-label="Pause video">
+                      <svg class="ico ico-play"><use href="#i-play"></use></svg>
+                      <svg class="ico ico-pause"><use href="#i-pause"></use></svg>
+                    </button>
+                    <button class="ctrl-btn hide-sm" id="back10" aria-label="Back 10 seconds"><svg class="ico"><use href="#i-back10"></use></svg></button>
+                    <button class="ctrl-btn hide-sm" id="fwd10" aria-label="Forward 10 seconds"><svg class="ico"><use href="#i-fwd10"></use></svg></button>
+                    <span class="time"><span id="currentTime">00:00</span><span class="time-sep">/</span><span id="duration">00:18</span></span>
+                  </div>
+                  <div class="control-group control-right">
+                    <button class="ctrl-btn hide-sm" id="muteBtn" aria-label="Mute">
+                      <svg class="ico ico-vol"><use href="#i-volume"></use></svg>
+                      <svg class="ico ico-mute"><use href="#i-mute"></use></svg>
+                    </button>
+                    <input class="volume" id="volume" type="range" min="0" max="1" step="0.01" value="0.55" aria-label="Volume">
+                    <button class="text-btn" id="speedBtn" aria-label="Playback speed">1×</button>
+                    <button class="text-btn is-on" id="ccBtn" aria-label="Toggle subtitles">CC</button>
+                    <button class="ctrl-btn" id="fullscreenBtn" aria-label="Fullscreen"><svg class="ico"><use href="#i-fullscreen"></use></svg></button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </article>
+
+          <div class="now-playing">
+            <div class="np-copy">
+              <div class="np-title-row">
+                <h1 id="videoTitle">Himalayan Sunrise</h1>
+                <span class="badge badge-blue">Demo</span>
+              </div>
+              <p class="np-sub">
+                <span id="videoMeta">Nature · Cinematic</span>
+                <span class="dot-sep"></span><span>1280×720</span>
+                <span class="dot-sep"></span><span>EN + हिन्दी</span>
+                <span class="dot-sep"></span><span class="ok"><svg class="ico"><use href="#i-check"></use></svg><span data-i18n="synced">Subtitle synced</span></span>
+              </p>
+            </div>
+            <div class="np-actions">
+              <button class="btn btn-ghost" id="openSrtBtn">
+                <svg class="ico"><use href="#i-upload"></use></svg><span data-i18n="openSrt">Open SRT</span>
+              </button>
+              <button class="btn btn-primary" id="addSubBtn">
+                <svg class="ico"><use href="#i-plus"></use></svg><span data-i18n="addSubtitle">Add subtitle</span>
+              </button>
+              <button class="btn btn-ghost icon-only" id="moreBtn" aria-label="More actions">
+                <svg class="ico"><use href="#i-more"></use></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="quick-actions">
+            <button class="quick" data-open="sync">
+              <span class="q-ico cyan"><svg class="ico"><use href="#i-sync"></use></svg></span>
+              <span class="q-copy"><strong data-i18n="quickSync">Subtitle sync</strong><small id="syncSummary">Offset 0.0s</small></span>
+            </button>
+            <button class="quick" data-open="style">
+              <span class="q-ico amber"><svg class="ico"><use href="#i-tune"></use></svg></span>
+              <span class="q-copy"><strong data-i18n="quickStyle">Appearance</strong><small id="styleSummary">Yellow · 30px</small></span>
+            </button>
+            <button class="quick" data-screen-jump="tts">
+              <span class="q-ico green"><svg class="ico"><use href="#i-headphones"></use></svg></span>
+              <span class="q-copy"><strong data-i18n="quickTts">Offline TTS</strong><small data-i18n="quickTtsSub">Hindi narration</small></span>
+            </button>
+            <button class="quick" data-open="export">
+              <span class="q-ico pink"><svg class="ico"><use href="#i-download"></use></svg></span>
+              <span class="q-copy"><strong data-i18n="quickExport">Export</strong><small data-i18n="quickExportSub">SRT · burned-in</small></span>
+            </button>
+          </div>
+
+          <div class="feature-strip">
+            <span class="strip-label"><svg class="ico"><use href="#i-star"></use></svg><span data-i18n="featured">Built for bilingual viewing</span></span>
+            <span class="feature"><svg class="ico"><use href="#i-cc"></use></svg>SRT + VTT</span>
+            <span class="feature"><svg class="ico"><use href="#i-translate"></use></svg>EN → हिन्दी</span>
+            <span class="feature"><svg class="ico"><use href="#i-headphones"></use></svg>Offline voice</span>
+            <span class="feature"><svg class="ico"><use href="#i-shield"></use></svg>Stays on device</span>
+          </div>
+        </div>
+
+        <aside class="side-panel">
+          <div class="side-card">
+            <div class="side-tabs" role="tablist" aria-label="Subtitle tools">
+              <button class="side-tab is-active" data-panel="subs"><span data-i18n="tabSubs">Subtitles</span><span class="pill" id="cueCount">8</span></button>
+              <button class="side-tab" data-panel="style" data-i18n="tabStyle">Style</button>
+              <button class="side-tab" data-panel="voice" data-i18n="tabVoice">Voice</button>
+            </div>
+
+            <div class="side-body">
+              <div class="side-pane is-active" data-pane="subs">
+                <div class="track-row">
+                  <span class="track-flag">EN</span>
+                  <div class="track-info">
+                    <strong id="trackName">English + हिन्दी</strong>
+                    <small><span id="trackFile">sample-en.srt</span> · <span id="trackCues">8 cues</span></small>
+                  </div>
+                  <span class="badge badge-green"><span class="dot"></span><span data-i18n="synced">Synced</span></span>
+                </div>
+                <label class="search">
+                  <svg class="ico"><use href="#i-search"></use></svg>
+                  <input id="subSearch" type="search" placeholder="Search dialogue or speakers…" data-i18n-placeholder="searchSubs">
+                  <kbd>/</kbd>
+                </label>
+                <div class="cue-list" id="cueList" aria-label="Subtitle cues"></div>
+                <div class="side-footer">
+                  <button class="btn btn-soft" id="pasteSubBtn"><svg class="ico"><use href="#i-edit"></use></svg><span data-i18n="pasteSrt">Paste SRT</span></button>
+                  <label class="btn btn-soft" for="srtFile"><svg class="ico"><use href="#i-upload"></use></svg><span data-i18n="loadFile">Load file</span></label>
+                  <input type="file" id="srtFile" accept=".srt,.vtt,text/plain" hidden>
+                </div>
+              </div>
+
+              <div class="side-pane" data-pane="style">
+                <div class="control-block">
+                  <div class="control-head"><span data-i18n="fontSize">Font size</span><output id="fontSizeOut">30px</output></div>
+                  <input id="fontSize" class="range" type="range" min="18" max="46" step="1" value="30">
+                </div>
+                <div class="control-block">
+                  <div class="control-head"><span data-i18n="textColor">Text color</span></div>
+                  <div class="swatches" id="swatches" role="group" aria-label="Subtitle text color">
+                    <button class="swatch is-active" data-color="#ffd600" style="--swatch:#ffd600" aria-label="Yellow"></button>
+                    <button class="swatch" data-color="#ffffff" style="--swatch:#ffffff" aria-label="White"></button>
+                    <button class="swatch" data-color="#00e5ff" style="--swatch:#00e5ff" aria-label="Cyan"></button>
+                    <button class="swatch" data-color="#ff9bd2" style="--swatch:#ff9bd2" aria-label="Pink"></button>
+                  </div>
+                </div>
+                <div class="control-block">
+                  <div class="control-head"><span data-i18n="backdrop">Backdrop</span><output id="bgOpacityOut">55%</output></div>
+                  <input id="bgOpacity" class="range" type="range" min="0" max="90" step="5" value="55">
+                </div>
+                <div class="control-block">
+                  <div class="control-head"><span data-i18n="position">Position</span><output id="positionOut">18%</output></div>
+                  <input id="position" class="range" type="range" min="4" max="46" step="1" value="18">
+                </div>
+                <div class="toggle-row">
+                  <span><strong data-i18n="boldText">Bold text</strong><small data-i18n="boldTextSub">High-contrast subtitle weight</small></span>
+                  <button class="switch is-on" id="boldToggle" role="switch" aria-checked="true"><span></span></button>
+                </div>
+                <div class="toggle-row">
+                  <span><strong data-i18n="outline">Outline</strong><small data-i18n="outlineSub">Crisp edge on bright scenes</small></span>
+                  <button class="switch is-on" id="outlineToggle" role="switch" aria-checked="true"><span></span></button>
+                </div>
+                <div class="style-preview" id="stylePreview">
+                  <span class="preview-en">Every sunrise is a promise</span>
+                  <span class="preview-hi">हर सूर्योदय एक वादा है</span>
+                </div>
+              </div>
+
+              <div class="side-pane" data-pane="voice">
+                <div class="voice-hero">
+                  <div class="eq" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>
+                  <strong data-i18n="offlineNarration">Offline Hindi narration</strong>
+                  <p data-i18n="offlineNarrationSub">Read every cue with a natural voice. No network needed.</p>
+                </div>
+                <label class="field">
+                  <span data-i18n="voice">Voice</span>
+                  <select id="voiceSelect">
+                    <option value="hi-IN">हिन्दी · Hindi (system)</option>
+                    <option value="en-IN">English · India</option>
+                    <option value="en-US">English · US</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span><span data-i18n="rate">Speaking rate</span> <output id="rateOut">0.95×</output></span>
+                  <input id="ttsRate" class="range" type="range" min="0.6" max="1.4" step="0.05" value="0.95">
+                </label>
+                <div class="voice-actions">
+                  <button class="btn btn-primary" id="readAllBtn"><svg class="ico"><use href="#i-play"></use></svg><span data-i18n="readAll">Read all cues</span></button>
+                  <button class="btn btn-ghost icon-only" id="stopReadBtn" aria-label="Stop reading"><svg class="ico"><use href="#i-stop"></use></svg></button>
+                </div>
+                <div class="mini-queue" id="miniQueue"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="mini-card tip-card">
+            <span class="tip-icon"><svg class="ico"><use href="#i-wave"></use></svg></span>
+            <div>
+              <strong data-i18n="tipTitle">Gesture ready</strong>
+              <p data-i18n="tipBody">Double-tap the left or right side to seek. Swipe up for volume, down for brightness.</p>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <section class="screen" id="screen-local" data-screen-panel="local">
+      <div class="page-head">
+        <div>
+          <span class="eyebrow"><span class="dot"></span><span data-i18n="onDevice">On-device library</span></span>
+          <h1 data-i18n="localTitle">Your videos, beautifully subtitled</h1>
+          <p data-i18n="localSub">Pick up where you left off. Every SRT is indexed and ready for bilingual playback.</p>
+        </div>
+        <div class="page-head-actions">
+          <label class="btn btn-primary" for="videoFile"><svg class="ico"><use href="#i-plus"></use></svg><span data-i18n="importVideo">Import video</span></label>
+          <input type="file" id="videoFile" accept="video/*" hidden>
+        </div>
+      </div>
+
+      <div class="library-toolbar">
+        <label class="search wide">
+          <svg class="ico"><use href="#i-search"></use></svg>
+          <input id="librarySearch" type="search" placeholder="Search your library…" data-i18n-placeholder="searchLibrary">
+        </label>
+        <div class="chips" role="group" aria-label="Library filters">
+          <button class="chip is-active" data-filter="all"><span data-i18n="filterAll">All</span><span class="chip-count">3</span></button>
+          <button class="chip" data-filter="ready"><span data-i18n="filterReady">SRT ready</span><span class="chip-count">3</span></button>
+          <button class="chip" data-filter="recent"><span data-i18n="filterRecent">Recently played</span></button>
+          <button class="chip" data-filter="sample"><span data-i18n="filterSamples">Samples</span></button>
+        </div>
+      </div>
+
+      <div class="library-grid" id="libraryGrid">
+        <button class="video-card" data-video="dawn" data-filter-tags="ready recent sample">
+          <span class="thumb">
+            <img src="assets/dawn.jpg" alt="Himalayan sunrise over layered mountains" loading="lazy">
+            <span class="thumb-shade"></span>
+            <span class="duration">00:18</span>
+            <span class="resume"><span class="resume-bar" style="width:34%"></span></span>
+            <span class="play-circle"><svg class="ico"><use href="#i-play"></use></svg></span>
+            <span class="thumb-badge"><svg class="ico"><use href="#i-cc"></use></svg>EN · हिन्दी</span>
+          </span>
+          <span class="video-card-body">
+            <span class="video-card-title">Himalayan Sunrise <span class="badge badge-blue">Demo</span></span>
+            <span class="video-card-meta">Nature · 18s · 720p</span>
+            <span class="video-card-foot"><span class="ok"><svg class="ico"><use href="#i-check"></use></svg><span data-i18n="synced">Synced</span></span><span>34% watched</span></span>
+          </span>
+        </button>
+
+        <button class="video-card" data-video="city" data-filter-tags="ready sample">
+          <span class="thumb">
+            <img src="assets/city.jpg" alt="Neon city skyline at night" loading="lazy">
+            <span class="thumb-shade"></span>
+            <span class="duration">00:10</span>
+            <span class="resume"><span class="resume-bar" style="width:12%"></span></span>
+            <span class="play-circle"><svg class="ico"><use href="#i-play"></use></svg></span>
+            <span class="thumb-badge"><svg class="ico"><use href="#i-cc"></use></svg>EN · हिन्दी</span>
+          </span>
+          <span class="video-card-body">
+            <span class="video-card-title">Neon City Nights</span>
+            <span class="video-card-meta">Cinematic · 10s · 720p</span>
+            <span class="video-card-foot"><span class="ok"><svg class="ico"><use href="#i-check"></use></svg><span data-i18n="synced">Synced</span></span><span>12% watched</span></span>
+          </span>
+        </button>
+
+        <button class="video-card" data-video="ocean" data-filter-tags="ready sample">
+          <span class="thumb">
+            <img src="assets/ocean.jpg" alt="Sailboat on a teal ocean at sunset" loading="lazy">
+            <span class="thumb-shade"></span>
+            <span class="duration">00:10</span>
+            <span class="resume"><span class="resume-bar" style="width:0%"></span></span>
+            <span class="play-circle"><svg class="ico"><use href="#i-play"></use></svg></span>
+            <span class="thumb-badge"><svg class="ico"><use href="#i-cc"></use></svg>EN · हिन्दी</span>
+          </span>
+          <span class="video-card-body">
+            <span class="video-card-title">Ocean Horizon</span>
+            <span class="video-card-meta">Travel · 10s · 720p</span>
+            <span class="video-card-foot"><span class="ok"><svg class="ico"><use href="#i-check"></use></svg><span data-i18n="synced">Synced</span></span><span>Not started</span></span>
+          </span>
+        </button>
+
+        <label class="import-card" for="videoFile">
+          <span class="import-icon"><svg class="ico"><use href="#i-plus"></use></svg></span>
+          <strong data-i18n="importTitle">Add a local video</strong>
+          <p data-i18n="importBody">MP4, WebM or MKV from this device. Nothing is uploaded.</p>
+          <span class="btn btn-soft"><svg class="ico"><use href="#i-folder"></use></svg><span data-i18n="browseFiles">Browse files</span></span>
+        </label>
+      </div>
+
+      <div class="privacy-banner">
+        <span class="privacy-icon"><svg class="ico"><use href="#i-shield"></use></svg></span>
+        <div><strong data-i18n="privacyTitle">Private by design</strong><p data-i18n="privacyBody">Videos and subtitle files stay in this browser. Translation context and voice playback run entirely on-device.</p></div>
+        <span class="badge badge-green"><span class="dot"></span><span data-i18n="offlineReady">Offline ready</span></span>
+      </div>
+    </section>
+
+    <section class="screen" id="screen-tts" data-screen-panel="tts">
+      <div class="page-head tts-head">
+        <div>
+          <span class="eyebrow"><span class="dot"></span><span data-i18n="accessibility">Accessibility</span></span>
+          <h1 data-i18n="ttsTitle">Offline subtitle reader</h1>
+          <p data-i18n="ttsSub">Listen to any SRT with expressive Hindi narration. Perfect for language practice, accessibility and dubbing prep.</p>
+        </div>
+        <div class="tts-head-actions">
+          <span class="badge badge-green"><span class="dot"></span><span data-i18n="offlineReady">Offline ready</span></span>
+          <button class="btn btn-ghost" id="ttsLoadSrt"><svg class="ico"><use href="#i-upload"></use></svg><span data-i18n="loadSrt">Load SRT</span></button>
+        </div>
+      </div>
+
+      <div class="tts-grid">
+        <article class="reader-card">
+          <div class="reader-top">
+            <div class="reader-track">
+              <span class="track-flag">हि</span>
+              <div><strong>Hindi narration</strong><small>sample-en.srt · <span id="ttsCueCount">8</span> cues · 00:18</small></div>
+            </div>
+            <div class="reader-lang" role="group" aria-label="Narration language">
+              <button class="lang-chip is-active" data-tts-lang="hi">हिन्दी</button>
+              <button class="lang-chip" data-tts-lang="en">English</button>
+            </div>
+          </div>
+
+          <div class="reader-now">
+            <span class="reader-label"><span class="eq small" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></span><span data-i18n="nowReading">Now reading</span><span class="reader-index" id="readerIndex">Cue 2 of 8</span></span>
+            <p class="reader-line reader-hi" id="readerLineHi">सुनहरी नदी के नीचे एक शांत घाटी जागती है।</p>
+            <p class="reader-line reader-en" id="readerLineEn">A quiet valley wakes beneath a river of gold.</p>
+          </div>
+
+          <div class="reader-progress"><span id="readerProgress" style="width:24%"></span></div>
+          <div class="reader-time"><span>00:04</span><span>00:18</span></div>
+
+          <div class="reader-controls">
+            <button class="ctrl-btn round" id="readerBack" aria-label="Previous cue"><svg class="ico"><use href="#i-skip"></use></svg></button>
+            <button class="reader-play" id="readerPlay" aria-label="Read all cues"><svg class="ico ico-play"><use href="#i-play"></use></svg><svg class="ico ico-pause"><use href="#i-pause"></use></svg></button>
+            <button class="ctrl-btn round" id="readerNext" aria-label="Next cue"><svg class="ico flip"><use href="#i-skip"></use></svg></button>
+            <div class="reader-control-meta">
+              <label class="field inline"><span data-i18n="voice">Voice</span><select id="readerVoice"><option value="hi-IN">हिन्दी · Hindi (system)</option><option value="en-IN">English · India</option><option value="en-US">English · US</option></select></label>
+              <label class="field inline"><span><span data-i18n="rate">Rate</span> <output id="readerRateOut">0.95×</output></span><input id="readerRate" class="range" type="range" min="0.6" max="1.4" step="0.05" value="0.95"></label>
+            </div>
+          </div>
+
+          <div class="reader-stats">
+            <span><svg class="ico"><use href="#i-list"></use></svg><strong>8</strong> cues</span>
+            <span><svg class="ico"><use href="#i-clock"></use></svg><strong>00:18</strong> runtime</span>
+            <span><svg class="ico"><use href="#i-headphones"></use></svg><strong>2</strong> voices</span>
+            <span><svg class="ico"><use href="#i-shield"></use></svg><strong>0</strong> uploads</span>
+          </div>
+        </article>
+
+        <aside class="queue-card">
+          <div class="queue-head">
+            <div><strong data-i18n="cueQueue">Cue queue</strong><small data-i18n="cueQueueSub">Tap any line to read it aloud</small></div>
+            <button class="icon-btn small" id="queueCopy" title="Copy all cues" aria-label="Copy all cues"><svg class="ico"><use href="#i-edit"></use></svg></button>
+          </div>
+          <label class="search">
+            <svg class="ico"><use href="#i-search"></use></svg>
+            <input id="queueSearch" type="search" placeholder="Search dialogue…" data-i18n-placeholder="searchDialogue">
+          </label>
+          <div class="queue-list" id="queueList"></div>
+          <div class="queue-footer">
+            <button class="btn btn-primary" id="queueReadAll"><svg class="ico"><use href="#i-play"></use></svg><span data-i18n="readAll">Read all cues</span></button>
+            <button class="btn btn-ghost icon-only" id="queueStop" aria-label="Stop reading"><svg class="ico"><use href="#i-stop"></use></svg></button>
+          </div>
+        </aside>
+      </div>
+    </section>
+  </main>
+
+  <nav class="mobile-nav" aria-label="Primary mobile">
+    <button class="mobile-tab" data-screen="local"><svg class="ico"><use href="#i-folder"></use></svg><span data-i18n="navLocal">Local</span></button>
+    <button class="mobile-tab is-active" data-screen="player"><svg class="ico"><use href="#i-play"></use></svg><span data-i18n="navPlayer">Player</span></button>
+    <button class="mobile-tab" data-screen="tts"><svg class="ico"><use href="#i-headphones"></use></svg><span data-i18n="navTts">Subtitle TTS</span></button>
+  </nav>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <dialog class="modal" id="addDialog">
+    <form method="dialog" class="modal-card" id="addForm">
+      <div class="modal-head">
+        <div><span class="eyebrow">Subtitles</span><h2>Add a subtitle track</h2><p>Paste SRT or VTT text, or load a file from this device.</p></div>
+        <button class="icon-btn" value="cancel" aria-label="Close"><svg class="ico"><use href="#i-x"></use></svg></button>
+      </div>
+      <div class="modal-body">
+        <div class="sample-row">
+          <button type="button" class="btn btn-soft" data-sample="dawn">🇮🇳 Hindi sample</button>
+          <button type="button" class="btn btn-soft" data-sample="city">🌃 Neon city</button>
+          <button type="button" class="btn btn-soft" data-sample="ocean">🌊 Ocean</button>
+        </div>
+        <label class="field">
+          <span>SRT / VTT text</span>
+          <textarea id="subText" rows="9" spellcheck="false" placeholder="1&#10;00:00:00,400 --> 00:00:02,600&#10;Your subtitle line here"></textarea>
+        </label>
+        <div class="modal-row">
+          <label class="btn btn-soft" for="srtFile2"><svg class="ico"><use href="#i-upload"></use></svg>Load .srt file</label>
+          <input type="file" id="srtFile2" accept=".srt,.vtt,text/plain" hidden>
+          <span class="hint">Times use <code>hh:mm:ss,mmm</code></span>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn btn-ghost" value="cancel">Cancel</button>
+        <button class="btn btn-primary" id="applySub" value="apply"><svg class="ico"><use href="#i-check"></use></svg>Apply track</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="modal" id="syncDialog">
+    <form method="dialog" class="modal-card narrow">
+      <div class="modal-head">
+        <div><span class="eyebrow">Timing</span><h2>Subtitle sync</h2><p>Nudge every cue until the dialogue lands perfectly.</p></div>
+        <button class="icon-btn" value="cancel" aria-label="Close"><svg class="ico"><use href="#i-x"></use></svg></button>
+      </div>
+      <div class="modal-body">
+        <div class="offset-readout"><span id="offsetValue">+0.0</span><small>seconds</small></div>
+        <input id="offsetRange" class="range" type="range" min="-5" max="5" step="0.1" value="0">
+        <div class="sync-buttons">
+          <button type="button" class="btn btn-soft" data-offset="-0.5">− 0.5s</button>
+          <button type="button" class="btn btn-soft" data-offset="0.5">+ 0.5s</button>
+          <button type="button" class="btn btn-ghost" data-offset="reset">Reset</button>
+        </div>
+      </div>
+      <div class="modal-foot"><button class="btn btn-primary" value="done"><svg class="ico"><use href="#i-check"></use></svg>Done</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal" id="exportDialog">
+    <form method="dialog" class="modal-card narrow">
+      <div class="modal-head">
+        <div><span class="eyebrow">Share</span><h2>Export subtitles</h2><p>Download the current bilingual track or a burned-in video.</p></div>
+        <button class="icon-btn" value="cancel" aria-label="Close"><svg class="ico"><use href="#i-x"></use></svg></button>
+      </div>
+      <div class="modal-body">
+        <label class="export-option"><span><strong>Bilingual SRT</strong><small>English followed by हिन्दी on each cue</small></span><input type="radio" name="export" value="srt" checked></label>
+        <label class="export-option"><span><strong>Hindi-only SRT</strong><small>Clean track for dubbing handoff</small></span><input type="radio" name="export" value="hi"></label>
+        <label class="export-option"><span><strong>Burned-in video</strong><small>Render captions into the demo clip</small></span><input type="radio" name="export" value="video"></label>
+      </div>
+      <div class="modal-foot"><button class="btn btn-primary" id="doExport" value="export"><svg class="ico"><use href="#i-download"></use></svg>Export</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal" id="helpDialog">
+    <form method="dialog" class="modal-card">
+      <div class="modal-head">
+        <div><span class="eyebrow">Guide</span><h2>Everything in reach</h2><p>A quick tour of the player, subtitles and offline voice tools.</p></div>
+        <button class="icon-btn" value="cancel" aria-label="Close"><svg class="ico"><use href="#i-x"></use></svg></button>
+      </div>
+      <div class="modal-body help-grid">
+        <div class="help-item"><span class="q-ico cyan"><svg class="ico"><use href="#i-cc"></use></svg></span><div><strong>Bilingual captions</strong><p>Load any SRT or VTT. Toggle EN + हिन्दी, adjust size, color and backdrop.</p></div></div>
+        <div class="help-item"><span class="q-ico amber"><svg class="ico"><use href="#i-sync"></use></svg></span><div><strong>Frame-perfect sync</strong><p>Use the offset slider in 0.1s steps, or the −0.5s / +0.5s buttons.</p></div></div>
+        <div class="help-item"><span class="q-ico green"><svg class="ico"><use href="#i-headphones"></use></svg></span><div><strong>Offline narration</strong><p>Read all cues with the system Hindi voice. Rate and voice are adjustable.</p></div></div>
+        <div class="help-item"><span class="q-ico pink"><svg class="ico"><use href="#i-download"></use></svg></span><div><strong>Export anywhere</strong><p>Download bilingual SRT or a Hindi-only track for your dubbing workflow.</p></div></div>
+        <div class="help-item"><span class="q-ico blue"><svg class="ico"><use href="#i-camera"></use></svg></span><div><strong>Capture a frame</strong><p>Tap the camera in the player to save a poster-ready frame.</p></div></div>
+        <div class="help-item"><span class="q-ico red"><svg class="ico"><use href="#i-shield"></use></svg></span><div><strong>Private by design</strong><p>Files never leave the browser. No upload, no account, no tracking.</p></div></div>
+      </div>
+      <div class="modal-foot"><span class="hint">Shortcuts: Space play · ← → seek · F fullscreen · S subtitles</span><button class="btn btn-primary" value="done">Got it</button></div>
+    </form>
+  </dialog>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
