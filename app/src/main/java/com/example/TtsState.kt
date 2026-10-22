@@ -202,6 +202,8 @@ data class TtsUiState(
     val pitchProgress: Int = 50,
     val speechState: SpeechState = SpeechState.READY,
     val statusMessage: String = "TTS Ready",
+    val isLoadingSubtitles: Boolean = false,
+    val subtitleToast: String? = null,
     val isHindiSupported: Boolean = true,
     val isSpokenLangSupported: Boolean = true,
     val errorMessage: String? = null,
@@ -287,7 +289,10 @@ data class TtsUiState(
     val lastSpokenSubtitleIndex: Int = -1,
     val isOfflineSubtitleMode: Boolean = true,
     val preferOfflineVoice: Boolean = true,
+    val isHindiOfflineVoiceAvailable: Boolean = false,
     val showOfflineSubtitleReaderDialog: Boolean = false,
+    val showHindiVoiceSetupDialog: Boolean = false,
+    val ttsEngineLabel: String = "System TTS",
     val isSubtitleReaderPlaying: Boolean = false,
     val readingSubtitleIndex: Int = -1,
     val subtitleReaderDelaySeconds: Float = 0.5f,
@@ -399,6 +404,7 @@ val TtsUiState.hasAnyOpenDialog: Boolean
             showZoomControlsDialog ||
             showVideoSoundTrackDialog ||
             showOfflineSubtitleReaderDialog ||
+            showHindiVoiceSetupDialog ||
             showBgmTrackMixerDialog ||
             showLanguageSelectorDialog ||
             showSrtLibraryDialog ||

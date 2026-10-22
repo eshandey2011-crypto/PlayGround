@@ -847,6 +847,14 @@ fun MxPlayerSurfaceBox(
                                 leadingIcon = { Icon(Icons.Default.SyncAlt, contentDescription = null) }
                             )
                             DropdownMenuItem(
+                                text = { Text("Hindi Voice Setup") },
+                                onClick = {
+                                    showPlayerMenu = false
+                                    ttsViewModel.showHindiVoiceSetupDialog(true)
+                                },
+                                leadingIcon = { Icon(Icons.Default.RecordVoiceOver, contentDescription = null) }
+                            )
+                            DropdownMenuItem(
                                 text = { Text("Subtitle Sync (Full)") },
                                 onClick = {
                                     showPlayerMenu = false

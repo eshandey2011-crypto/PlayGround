@@ -145,6 +145,27 @@ fun MainAppScreen(
     val configuration = LocalConfiguration.current
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
 
+    // Subtitle load result/error feedback (statusMessage is not rendered anywhere).
+    LaunchedEffect(uiState.subtitleToast) {
+        uiState.subtitleToast?.let { msg ->
+            Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+            ttsViewModel.consumeSubtitleToast()
+        }
+    }
+
+    // Returning from the system TTS installer: re-scan installed voices so the
+    // newly downloaded Hindi offline voice is picked up immediately.
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                ttsViewModel.refreshVoiceData()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     var showMenuDropdown by remember { mutableStateOf(false) }
     var selectedVideoForInfo by remember { mutableStateOf<MxVideoItem?>(null) }
 
@@ -163,17 +184,11 @@ fun MainAppScreen(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         uri?.let {
-            try {
-                context.contentResolver.openInputStream(it)?.use { stream ->
-                    val reader = BufferedReader(InputStreamReader(stream))
-                    val content = reader.readText()
-                    val fileName = it.lastPathSegment ?: "imported.srt"
-                    ttsViewModel.loadSrtText(content, fileName)
-                    Toast.makeText(context, "Loaded Subtitle: $fileName", Toast.LENGTH_SHORT).show()
-                }
-            } catch (e: Exception) {
-                Toast.makeText(context, "Failed to read subtitle: ${e.message}", Toast.LENGTH_SHORT).show()
-            }
+            // Reading/parsing happens inside the ViewModel off the main thread;
+            // 4 MB+ subtitle files previously froze the UI here.
+            val fileName = it.lastPathSegment ?: "imported.srt"
+            Toast.makeText(context, "Loading subtitle: $fileName", Toast.LENGTH_SHORT).show()
+            ttsViewModel.loadSrtFromUri(it, fileName)
         }
     }
 
@@ -682,11 +697,24 @@ fun MainAppScreen(
             onDelayChange = { ttsViewModel.setSubtitleReaderDelay(it) },
             onStartReader = { ttsViewModel.startSubtitleReader() },
             onStopReader = { ttsViewModel.stopSubtitleReader() },
+            onTestVoice = { ttsViewModel.testVoiceOutput() },
+            onInstallHindiVoice = { ttsViewModel.showHindiVoiceSetupDialog(true) },
             onOpenVoiceProfiles = {
                 ttsViewModel.showOfflineSubtitleReaderDialog(false)
                 ttsViewModel.showVoiceProfilesDialog(true)
             },
             onDismiss = { ttsViewModel.showOfflineSubtitleReaderDialog(false) }
+        )
+    }
+
+    if (uiState.showHindiVoiceSetupDialog) {
+        HindiVoiceSetupDialog(
+            uiState = uiState,
+            onInstallVoiceData = { ttsViewModel.openTtsInstallData() },
+            onOpenTtsSettings = { ttsViewModel.openTtsSettings() },
+            onOpenPlayStore = { ttsViewModel.openGoogleTtsStore() },
+            onRefresh = { ttsViewModel.refreshVoiceDataWithFeedback() },
+            onDismiss = { ttsViewModel.showHindiVoiceSetupDialog(false) }
         )
     }
 

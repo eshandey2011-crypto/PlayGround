@@ -2,14 +2,17 @@ package com.example
 
 import android.app.Application
 import android.content.Context
+import android.content.Intent
 import android.media.AudioManager
 import android.net.Uri
+import android.provider.Settings
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -21,9 +24,11 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
 import java.io.File
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.math.roundToInt
 
@@ -36,7 +41,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
     private val srtSubtitleDao = database.srtSubtitleDao()
     private val srtSubtitleRepo = SrtSubtitleRepository(srtSubtitleDao)
     private val srtHistoryDao = database.srtHistoryDao()
-    private val srtHistoryRepo = SrtHistoryRepository(srtHistoryDao)
+    private val srtHistoryRepo = SrtHistoryRepository(context, srtHistoryDao)
 
     private val _uiState = MutableStateFlow(TtsUiState())
     val uiState: StateFlow<TtsUiState> = _uiState.asStateFlow()
@@ -163,6 +168,9 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                     else "${language.nativeName} voice missing — fallback active (install ${language.englishName} voice data for best quality)",
                     isHindiSupported = if (language == AppLanguage.HINDI) isLangSupported else it.isHindiSupported,
                     isSpokenLangSupported = isLangSupported,
+                    isHindiOfflineVoiceAvailable = hasOfflineHindiVoice(availableVoices),
+                    ttsEngineLabel = ttsInstance.defaultEngine
+                        ?: "System TTS",
                     voices = availableVoices,
                     selectedVoice = chosenVoice
                 )
@@ -209,9 +217,14 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                 !v.isNetworkRequired && v.rawVoice?.isNetworkConnectionRequired != true &&
                     v.rawVoice?.name?.lowercase()?.contains("network") != true
             }
-            val chosen = offlineLang.firstOrNull()
-                ?: langVoices.firstOrNull { v -> !v.isNetworkRequired }
-                ?: langVoices.firstOrNull()
+            val chosen = if (_uiState.value.preferOfflineVoice) {
+                offlineLang.firstOrNull()
+                    ?: langVoices.firstOrNull { v -> !v.isNetworkRequired }
+                    ?: langVoices.firstOrNull()
+            } else {
+                // Online mode: allow network voices for best quality.
+                langVoices.firstOrNull() ?: _uiState.value.selectedVoice
+            }
             chosen?.rawVoice?.let { voice ->
                 val notInstalled = try {
                     voice.features?.contains(TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED) == true
@@ -228,6 +241,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                 it.copy(
                     isHindiSupported = if (language == AppLanguage.HINDI) supported else it.isHindiSupported,
                     isSpokenLangSupported = supported,
+                    isHindiOfflineVoiceAvailable = hasOfflineHindiVoice(it.voices),
                     selectedVoice = chosen ?: it.selectedVoice,
                     statusMessage = if (supported) "${language.nativeName} TTS Ready"
                     else "${language.nativeName} voice missing — install ${language.englishName} voice data",
@@ -247,14 +261,254 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
             }
 
             override fun onDone(utteranceId: String?) {
+                utteranceId?.let { speechCompletions.remove(it)?.complete(true) }
                 _uiState.update { it.copy(speechState = SpeechState.READY) }
             }
 
             @Deprecated("Deprecated in Java")
             override fun onError(utteranceId: String?) {
+                utteranceId?.let { speechCompletions.remove(it)?.complete(false) }
+                _uiState.update {
+                    it.copy(
+                        speechState = SpeechState.READY,
+                        subtitleToast = "Voice engine error — offline voice data install karo (Settings > TTS)."
+                    )
+                }
+            }
+
+            override fun onError(utteranceId: String?, errorCode: Int) {
+                utteranceId?.let { speechCompletions.remove(it)?.complete(false) }
+                _uiState.update {
+                    it.copy(
+                        speechState = SpeechState.READY,
+                        subtitleToast = "Voice engine error ($errorCode) — offline voice data install karo (Settings > TTS)."
+                    )
+                }
+            }
+
+            override fun onStop(utteranceId: String?, interrupted: Boolean) {
+                utteranceId?.let { speechCompletions.remove(it)?.complete(false) }
                 _uiState.update { it.copy(speechState = SpeechState.READY) }
             }
         })
+    }
+
+    // --- Reader speech plumbing: wait for the engine instead of guessing ---
+
+    private val speechCompletions = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
+
+    private data class PreparedUtterance(
+        val text: String,
+        val pitch: Float,
+        val speed: Float,
+        val romanizedFallback: Boolean
+    )
+
+    /**
+     * Shared cue -> speech preparation (text, pitch, rate). Returns null when
+     * the cue must stay silent (muted, stale, blank).
+     */
+    private fun prepareUtterance(
+        cue: SrtItem,
+        state: TtsUiState,
+        readerMode: Boolean
+    ): PreparedUtterance? {
+        // Reader is an explicit user action: only a master mute silences it.
+        if (state.isMasterMuted) return null
+        if (!readerMode && (state.isDubbingMuted || !state.isAutoDubbingEnabled)) return null
+
+        ensureOfflineVoiceApplied(state)
+
+        var targetText = state.speechTextCache[cue.index]
+        if (targetText.isNullOrBlank()) {
+            targetText = if (state.appLanguage == AppLanguage.HINDI || state.isOfflineHindiVoiceInSubtitles) {
+                if (isDevanagari(cue.text)) cue.text else OfflineSubtitleEngine.translateLineToHindi(cue.text)
+            } else {
+                cue.cleanSpokenText.ifBlank { cue.text }
+            }
+        }
+
+        // Audibility fallback: selected language voice is missing, or offline
+        // mode has no installed voice for it (network voices go silent without
+        // internet) -> romanize Devanagari and use the on-device default voice.
+        // Online mode keeps native text (network voices are allowed there).
+        val offlineVoiceMissing = state.preferOfflineVoice &&
+            !hasInstalledOfflineVoiceFor(state, state.appLanguage.code)
+        var romanized = false
+        if ((!state.isSpokenLangSupported || offlineVoiceMissing) &&
+            DevanagariTransliteration.hasDevanagari(targetText)
+        ) {
+            targetText = DevanagariTransliteration.toPhoneticRoman(targetText)
+            romanized = targetText.isNotBlank()
+        }
+        if (targetText.isBlank()) return null
+
+        // Staleness guard (live dubbing only).
+        if (!readerMode && state.isVideoPlaying) {
+            if (state.videoPositionMs > cue.endTimeMs + 1500L) return null
+        }
+
+        // Deep Hindi narrator: single-deep mode (default) pins the pitch low so
+        // the offline voice always sounds like a calm male narrator.
+        val basePitch = if (state.isSingleDeepVoiceOnly) DEEP_NARRATOR_PITCH else pitchForCue(cue, state)
+
+        return PreparedUtterance(
+            text = targetText,
+            pitch = basePitch,
+            speed = rateForCue(cue, state, targetText),
+            romanizedFallback = romanized
+        )
+    }
+
+    /**
+     * Prefers a real offline MALE / narrator voice, optionally for one language.
+     * Female-but-only-offline-voice still wins over silence.
+     */
+    private fun pickDeepOfflineVoice(
+        candidates: List<TtsVoiceItem>,
+        langCode: String?
+    ): TtsVoiceItem? {
+        val offline = candidates.filter { item ->
+            item.rawVoice?.let { isOfflineInstalledVoice(it) } == true
+        }
+        val languagePool = if (langCode != null) {
+            offline.filter { item ->
+                item.rawVoice?.let { voiceMatchesLanguage(it, langCode) } == true
+            }
+        } else {
+            emptyList()
+        }
+        val pool = languagePool.ifEmpty { offline }
+        return pool.firstOrNull { it.gender == SpeakerGender.MALE || it.gender == SpeakerGender.NARRATOR }
+            ?: pool.firstOrNull {
+                it.rawVoice?.let { raw ->
+                    VoiceManager.determineVoiceGender(raw.name, raw.features) == SpeakerGender.MALE
+                } == true
+            }
+            ?: pool.firstOrNull()
+    }
+
+    /**
+     * Offline safety net: put the engine on a locale that actually has an
+     * installed on-device voice. Without this, the engine can keep a
+     * network-only Hindi voice selected and stay silent with internet off.
+     */
+    private fun ensureOfflineAudibleLocale(state: TtsUiState, romanizedFallback: Boolean) {
+        val ttsInstance = tts ?: return
+        try {
+            // Online mode: the chosen (possibly network) voice is allowed, so
+            // never force an offline voice here or Devanagari text would be
+            // spoken by an unrelated offline locale (silent/garbled).
+            if (!state.preferOfflineVoice) {
+                if (!romanizedFallback) return
+                // Romanized text needs a locale the engine can actually speak.
+                val result = ttsInstance.setLanguage(Locale.US)
+                if (result == TextToSpeech.LANG_MISSING_DATA ||
+                    result == TextToSpeech.LANG_NOT_SUPPORTED
+                ) {
+                    ttsInstance.setLanguage(Locale.getDefault())
+                }
+                return
+            }
+            if (!romanizedFallback) {
+                // Native text is speakable; make sure a deep voice matches it.
+                val native = pickDeepOfflineVoice(state.voices, state.appLanguage.code)?.rawVoice
+                if (native != null && ttsInstance.voice?.name != native.name) {
+                    ttsInstance.voice = native
+                }
+                return
+            }
+            // Romanized fallback: Hindi offline deep voice first (it reads Roman
+            // text fine), then device language, then English, then anything.
+            val deviceLang = Locale.getDefault().language
+            val fallback = pickDeepOfflineVoice(state.voices, state.appLanguage.code)?.rawVoice
+                ?: pickDeepOfflineVoice(state.voices, deviceLang)?.rawVoice
+                ?: pickDeepOfflineVoice(state.voices, "en")?.rawVoice
+                ?: pickDeepOfflineVoice(state.voices, null)?.rawVoice
+            if (fallback != null) {
+                if (ttsInstance.voice?.name != fallback.name) {
+                    ttsInstance.voice = fallback
+                }
+            } else {
+                // No offline voice advertised at all: at least reset language so
+                // the device default engine voice can speak the romanized text.
+                val result = ttsInstance.setLanguage(Locale.US)
+                if (result == TextToSpeech.LANG_MISSING_DATA ||
+                    result == TextToSpeech.LANG_NOT_SUPPORTED
+                ) {
+                    ttsInstance.setLanguage(Locale.getDefault())
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Offline locale fallback failed: ${e.message}")
+        }
+    }
+
+    /** True only when the device has a real on-device (non-network) voice for this language. */
+    private fun hasInstalledOfflineVoiceFor(state: TtsUiState, langCode: String): Boolean {
+        return state.voices.any { item ->
+            val raw = item.rawVoice ?: return@any false
+            isOfflineInstalledVoice(raw) && voiceMatchesLanguage(raw, langCode)
+        }
+    }
+
+    private fun voiceMatchesLanguage(raw: Voice, langCode: String): Boolean {
+        // raw.locale.language is the reliable tag ("hi"); displayName is not.
+        return raw.locale?.language.equals(langCode, ignoreCase = true) ||
+            raw.name.lowercase().startsWith("${langCode.lowercase()}-")
+    }
+
+    /**
+     * Reader path: speaks one cue and suspends until the engine reports done
+     * (or a safety timeout). This is what makes continuous reading reliable —
+     * the old fixed-delay timer skipped cues whenever speech ran slower.
+     */
+    private suspend fun speakCueAndAwait(cue: SrtItem): Boolean {
+        // TTS init is async; give it a moment instead of silently skipping cues.
+        var waited = 0L
+        while ((tts == null || !isTtsInitialized) && waited < 3_000L) {
+            delay(150)
+            waited += 150
+        }
+        val ttsInstance = tts
+        if (ttsInstance == null || !isTtsInitialized) {
+            _uiState.update {
+                it.copy(subtitleToast = "TTS engine ready nahi hai — thodi der baad phir Start dabao.")
+            }
+            return false
+        }
+
+        val prepared = prepareUtterance(cue, _uiState.value, readerMode = true) ?: return false
+        ensureOfflineAudibleLocale(_uiState.value, prepared.romanizedFallback)
+        val utteranceId = "reader_${cue.index}_${System.currentTimeMillis()}"
+        val done = CompletableDeferred<Boolean>()
+        speechCompletions[utteranceId] = done
+        return try {
+            ttsInstance.setPitch(prepared.pitch)
+            ttsInstance.setSpeechRate(prepared.speed)
+            // QUEUE_FLUSH: reader owns the engine; no stale cue backlog.
+            val result = ttsInstance.speak(
+                prepared.text,
+                TextToSpeech.QUEUE_FLUSH,
+                null,
+                utteranceId
+            )
+            if (result != TextToSpeech.SUCCESS) {
+                speechCompletions.remove(utteranceId)
+                _uiState.update {
+                    it.copy(subtitleToast = "Voice start nahi hui — offline voice data install karo.")
+                }
+                return false
+            }
+            // Timeout scales with text length so long lines are never cut off.
+            val timeoutMs = (prepared.text.length * 200L + 5_000L).coerceIn(8_000L, 90_000L)
+            withTimeoutOrNull(timeoutMs) { done.await() } ?: false
+        } catch (e: Exception) {
+            Log.e(TAG, "Reader speech failed: ${e.message}", e)
+            false
+        } finally {
+            speechCompletions.remove(utteranceId)
+        }
     }
 
     private fun loadInitialData() {
@@ -323,16 +577,17 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         // and must finish before the paragraph ends.
         val leadMs = state.dialogueLeadTimeMs.coerceIn(0L, 5000L)
 
-        // Find active subtitle cue (lead window for voice, exact window for display)
-        val activeCue = parsed.firstOrNull { cue ->
+        // Find active subtitle cue (lead window for voice, exact window for display).
+        // Use index-based lookups: parsed.indexOf(cue) on a data class compares the
+        // whole text and is very slow on multi-MB subtitle files.
+        val activeIndex = parsed.indexOfFirst { cue ->
             effectivePosition in cue.startTimeMs..cue.endTimeMs
         }
-        val upcomingCue = parsed.firstOrNull { cue ->
+        val activeCue = parsed.getOrNull(activeIndex)
+        val upcomingIndex = parsed.indexOfFirst { cue ->
             effectivePosition in (cue.startTimeMs - leadMs)..cue.endTimeMs
         }
-
-        val activeIndex = if (activeCue != null) parsed.indexOf(activeCue) else -1
-        val upcomingIndex = if (upcomingCue != null) parsed.indexOf(upcomingCue) else -1
+        val upcomingCue = parsed.getOrNull(upcomingIndex)
 
         _uiState.update {
             it.copy(
@@ -343,7 +598,10 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         }
 
         // Offline Subtitle Reader voice delivery (fires on the lead window).
-        if (state.isOfflineSubtitleMode && state.isVideoPlaying && upcomingCue != null && upcomingIndex != state.lastSpokenSubtitleIndex) {
+        // Reader mode owns the TTS engine itself; don't fight it with video cues.
+        if (state.isOfflineSubtitleMode && !state.isSubtitleReaderPlaying &&
+            state.isVideoPlaying && upcomingCue != null && upcomingIndex != state.lastSpokenSubtitleIndex
+        ) {
             speakSubtitleCue(upcomingCue)
         }
     }
@@ -358,52 +616,21 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         speechSynthesisJob?.cancel()
         speechSynthesisJob = viewModelScope.launch {
             try {
-                val state = _uiState.value
-                // Respect mute / dubbing switches so voice never fights user settings.
-                if (state.isDubbingMuted || state.isMasterMuted || !state.isAutoDubbingEnabled) return@launch
+                val prepared = prepareUtterance(
+                    cue,
+                    _uiState.value,
+                    readerMode = _uiState.value.isSubtitleReaderPlaying
+                ) ?: return@launch
 
-                // Keep an installed offline voice applied (internet-off safety).
-                ensureOfflineVoiceApplied(state)
-
-                val analysis = SpeakerDetector.analyzeLine(cue.text)
-                // Precomputed at subtitle load (no per-cue regex cost -> no lag).
-                var targetText = state.speechTextCache[cue.index]
-                if (targetText.isNullOrBlank()) {
-                    targetText = if (state.appLanguage == AppLanguage.HINDI || state.isOfflineHindiVoiceInSubtitles) {
-                        if (isDevanagari(cue.text)) cue.text else OfflineSubtitleEngine.translateLineToHindi(cue.text)
-                    } else {
-                        cue.cleanSpokenText.ifBlank { cue.text }
-                    }
-                }
-
-                // Audibility fallback: when the selected language voice data is
-                // missing on device, speak romanized phonetic text with the
-                // default locale instead of silence.
-                if (!state.isSpokenLangSupported && DevanagariTransliteration.hasDevanagari(targetText)) {
-                    targetText = DevanagariTransliteration.toPhoneticRoman(targetText)
-                }
-                if (targetText.isBlank()) return@launch
-
-                // Staleness guard (live dubbing only): video agar is cue ke
-                // end se bahut aage nikal gaya ho to purani timeline mat bolo —
-                // isse queue me backlog nahi jamta. Current dialogue hamesha
-                // poora bolega. (Reader mode me guard nahi lagta.)
-                if (state.isVideoPlaying && !state.isSubtitleReaderPlaying) {
-                    if (state.videoPositionMs > cue.endTimeMs + 1500L) return@launch
-                }
-
-                // Persona pitch + speed (shared with export synthesis).
-                val pitch = pitchForCue(cue, state)
-                val baseSpeed = rateForCue(cue, state, targetText)
-
-                ttsInstance.setPitch(pitch)
-                ttsInstance.setSpeechRate(baseSpeed)
+                ensureOfflineAudibleLocale(_uiState.value, prepared.romanizedFallback)
+                ttsInstance.setPitch(prepared.pitch)
+                ttsInstance.setSpeechRate(prepared.speed)
 
                 val utteranceId = "cue_${cue.index}_${System.currentTimeMillis()}"
                 // QUEUE_ADD: har dialogue POORA bolega, beech me nahi katega.
                 // 3-sec pre-roll + finish-before-end rate se timeline match rehta hai;
                 // stale guard upar backlog rokta hai taaki awaaz late na ho.
-                ttsInstance.speak(targetText, TextToSpeech.QUEUE_ADD, null, utteranceId)
+                ttsInstance.speak(prepared.text, TextToSpeech.QUEUE_ADD, null, utteranceId)
             } catch (e: Exception) {
                 Log.e(TAG, "Error in speakSubtitleCue: ${e.message}", e)
             }
@@ -450,10 +677,12 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                 // Online mode: pick best language voice, network allowed.
                 val langCode = state.appLanguage.code
                 val langVoices = state.voices.filter { v ->
-                    v.locale.contains(langCode, ignoreCase = true) ||
-                        v.rawVoice?.locale?.language.equals(langCode, ignoreCase = true)
+                    v.rawVoice?.let { voiceMatchesLanguage(it, langCode) } == true
                 }
-                val best = langVoices.firstOrNull() ?: state.selectedVoice
+                val best = langVoices.firstOrNull()
+                    ?: state.selectedVoice?.takeIf { v ->
+                        v.rawVoice?.let { voiceMatchesLanguage(it, langCode) } == true
+                    }
                 val raw = best?.rawVoice
                 if (raw != null && ttsInstance.voice?.name != raw.name) {
                     try {
@@ -463,35 +692,239 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                 }
                 return
             }
-            val manager = VoiceManager()
-            val params = manager.getVoiceParamsForSpeaker(
-                speaker = null,
-                availableVoices = state.voices,
-                selectedGlobalVoice = state.selectedVoice,
-                genderVoiceMode = GenderVoiceMode.SINGLE_DEEP_VOICE,
-                selectedVoicePersona = state.selectedVoicePersona
-            )
+            // Offline mode must land on a REAL installed on-device voice.
+            // Otherwise a network voice stays selected and speech is silent
+            // with internet off (this was why the offline reader looked dead).
+            // Always prefer a deep male/narrator voice for the Hindi narrator.
+            val target = pickDeepOfflineVoice(state.voices, state.appLanguage.code)
+                ?: pickDeepOfflineVoice(state.voices, null)
+            val targetVoice = target?.rawVoice ?: return
             // Skip redundant setVoice() calls (they can blip ongoing speech).
-            val candidate = params.voiceItem?.rawVoice
-            if (candidate != null && tts?.voice?.name != candidate.name) {
-                manager.applyVoiceToTts(tts, params, state.appLanguage.code)
+            if (tts?.voice?.name != targetVoice.name) {
+                try {
+                    ttsInstance.voice = targetVoice
+                } catch (e: Exception) {
+                    Log.w(TAG, "Offline voice apply failed: ${e.message}")
+                }
             }
         } catch (_: Exception) {
         }
     }
 
+    /** Real, installed, non-network voice — the only kind that works offline. */
+    private fun isOfflineInstalledVoice(voice: Voice): Boolean {
+        return try {
+            if (voice.isNetworkConnectionRequired) return false
+            val name = voice.name.lowercase()
+            if (name.contains("network") || name.contains("-online")) return false
+            voice.features?.contains(TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED) != true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun hasOfflineHindiVoice(voices: List<TtsVoiceItem>): Boolean {
+        return voices.any { item ->
+            item.rawVoice?.let { raw ->
+                isOfflineInstalledVoice(raw) &&
+                    voiceMatchesLanguage(raw, AppLanguage.HINDI.code)
+            } == true
+        }
+    }
+
+    /** Re-enumerates engine voices. Call after returning from the TTS installer. */
+    fun refreshVoiceData() {
+        if (!isTtsInitialized) return
+        setupTtsEngine()
+    }
+
+    fun refreshVoiceDataWithFeedback() {
+        refreshVoiceData()
+        val available = _uiState.value.isHindiOfflineVoiceAvailable
+        val msg = if (available) {
+            "Hindi offline voice mil gayi — ab Devanagari saaf sunai dega."
+        } else {
+            "Hindi offline voice abhi bhi nahi mili — installer me Hindi download karke Refresh dabao."
+        }
+        _uiState.update { it.copy(subtitleToast = msg, statusMessage = msg) }
+    }
+
+    fun showHindiVoiceSetupDialog(show: Boolean) {
+        _uiState.update { it.copy(showHindiVoiceSetupDialog = show) }
+    }
+
+    /** Engine's own TTS settings screen (voice data / engine choice). */
+    fun openTtsSettings() {
+        val candidates = listOf(
+            Intent("com.android.settings.TTS_SETTINGS"),
+            Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA),
+            Intent(Settings.ACTION_SETTINGS)
+        )
+        for (intent in candidates) {
+            try {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(intent)
+                return
+            } catch (_: Exception) {
+            }
+        }
+        _uiState.update {
+            it.copy(subtitleToast = "Settings nahi khul payi — manually Settings > Text-to-speech kholo.")
+        }
+    }
+
+    /** Opens Google Speech Services listing when the engine itself is missing/outdated. */
+    fun openGoogleTtsStore() {
+        val packageName = tts?.defaultEngine ?: "com.google.android.tts"
+        val market = Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$packageName"))
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val web = Intent(
+            Intent.ACTION_VIEW,
+            Uri.parse("https://play.google.com/store/apps/details?id=$packageName")
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        try {
+            context.startActivity(market)
+        } catch (_: Exception) {
+            try {
+                context.startActivity(web)
+            } catch (_: Exception) {
+                _uiState.update { it.copy(subtitleToast = "Play Store nahi khul paya.") }
+            }
+        }
+    }
+
+    /**
+     * Opens the system TTS voice-data installer so the user can download the
+     * Hindi (Devanagari) offline voice. Falls back to TTS settings, then to
+     * general settings when an OEM has no installer activity.
+     */
+    fun openTtsInstallData() {
+        val candidates = listOf(
+            Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA),
+            Intent("com.android.settings.TTS_SETTINGS"),
+            Intent(Settings.ACTION_SETTINGS)
+        )
+        for (intent in candidates) {
+            try {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(intent)
+                val msg = "Hindi offline voice download karo (voice data > Hindi), phir app me wapas aao."
+                _uiState.update { it.copy(subtitleToast = msg, statusMessage = msg) }
+                return
+            } catch (_: Exception) {
+                // Try the next intent.
+            }
+        }
+        _uiState.update {
+            it.copy(subtitleToast = "TTS settings nahi khul payi — Settings > Text-to-speech > Install voice data.")
+        }
+    }
+
     // --- Subtitle Loading & Translation ---
+
+    /**
+     * Reads a picked .srt/.vtt/.ass file off the main thread and loads it.
+     * Large files (4 MB+) must never be read/parsed on Main or the UI freezes
+     * and the picker looks like it "does nothing".
+     */
+    fun loadSrtFromUri(uri: android.net.Uri, fileName: String? = null) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoadingSubtitles = true, statusMessage = "Loading subtitle…") }
+            val (text, error) = try {
+                withContext(Dispatchers.IO) {
+                    val resolver = context.contentResolver
+                    // Some providers report 0 size; only reject clearly huge files.
+                    val declaredSize = try {
+                        resolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: -1L
+                    } catch (_: Exception) {
+                        -1L
+                    }
+                    if (declaredSize > MAX_SUBTITLE_BYTES) {
+                        return@withContext Pair(null, "File too large (${declaredSize / (1024 * 1024)} MB). Max ${MAX_SUBTITLE_BYTES / (1024 * 1024)} MB.")
+                    }
+                    val stream = resolver.openInputStream(uri)
+                        ?: return@withContext Pair(null, "Could not open this file. Copy it to local storage and try again.")
+                    val bytes = stream.use { it.readBytes() }
+                    if (bytes.isEmpty()) {
+                        return@withContext Pair(null, "File is empty.")
+                    }
+                    if (bytes.size > MAX_SUBTITLE_BYTES) {
+                        return@withContext Pair(null, "File too large (${bytes.size / (1024 * 1024)} MB). Max ${MAX_SUBTITLE_BYTES / (1024 * 1024)} MB.")
+                    }
+                    Pair(decodeSubtitleBytes(bytes), null)
+                }
+            } catch (e: Exception) {
+                Pair(null, "Failed to read subtitle: ${e.message}")
+            }
+
+            if (text == null) {
+                val msg = error ?: "Failed to read subtitle"
+                _uiState.update {
+                    it.copy(isLoadingSubtitles = false, statusMessage = msg, subtitleToast = msg)
+                }
+                return@launch
+            }
+            loadSrtText(text, fileName)
+        }
+    }
+
+    fun consumeSubtitleToast() {
+        _uiState.update { it.copy(subtitleToast = null) }
+    }
+
+    /** UTF-8 first, BOM-aware UTF-16, then Windows-1252 for legacy files. */
+    private fun decodeSubtitleBytes(bytes: ByteArray): String {
+        fun tryDecode(charset: java.nio.charset.Charset): String? = try {
+            val decoder = charset.newDecoder()
+                .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+            decoder.decode(java.nio.ByteBuffer.wrap(bytes)).toString()
+        } catch (_: Exception) {
+            null
+        }
+        if (bytes.size >= 2) {
+            val b0 = bytes[0].toInt() and 0xFF
+            val b1 = bytes[1].toInt() and 0xFF
+            if (b0 == 0xFE && b1 == 0xFF) {
+                return (tryDecode(Charsets.UTF_16BE) ?: "").removePrefix("\uFEFF")
+            }
+            if (b0 == 0xFF && b1 == 0xFE) {
+                return (tryDecode(Charsets.UTF_16LE) ?: "").removePrefix("\uFEFF")
+            }
+        }
+        tryDecode(Charsets.UTF_8)?.let { return it.removePrefix("\uFEFF") }
+        return String(bytes, java.nio.charset.Charset.forName("windows-1252"))
+    }
 
     fun loadSrtText(rawText: String, fileName: String? = null) {
         viewModelScope.launch {
             try {
+                _uiState.update { it.copy(isLoadingSubtitles = true) }
                 val format = SubtitleFormat.fromFileName(fileName)
-                val parsedItems = SrtParser.parse(rawText)
-                val langDetection = SrtLanguageDetector.detectLanguage(rawText)
-                // Precompute spoken Hindi once (withContext Default would be nicer,
-                // but cues are small; keeps ordering simple on Main).
+                // Parsing a 4 MB file with regexes is heavy -> keep it off Main.
+                val (parsedItems, langDetection) = withContext(Dispatchers.Default) {
+                    val items = SrtParser.parse(rawText, fileName = fileName)
+                    Pair(items, SrtLanguageDetector.detectLanguage(rawText))
+                }
+                if (parsedItems.isEmpty()) {
+                    val msg = "No subtitles found in this file. Format check karo (.srt / .vtt / .ass)."
+                    _uiState.update {
+                        it.copy(
+                            isLoadingSubtitles = false,
+                            statusMessage = msg,
+                            subtitleToast = msg
+                        )
+                    }
+                    return@launch
+                }
+                // Precompute spoken Hindi only for reasonably sized files; huge
+                // files fall back to on-demand translation in the speak path.
                 val speechCache = try {
-                    withContext(Dispatchers.Default) { buildSpeechTextCache(parsedItems) }
+                    if (parsedItems.size <= SPEECH_CACHE_MAX_CUES) {
+                        withContext(Dispatchers.Default) { buildSpeechTextCache(parsedItems) }
+                    } else {
+                        emptyMap()
+                    }
                 } catch (_: Exception) {
                     emptyMap()
                 }
@@ -508,7 +941,10 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                         srtLanguageDetection = langDetection,
                         originalSrtBackup = rawText,
                         isTranslatedWithGemini = false,
-                        showLanguageWarningBanner = !langDetection.isHindi && it.autoTranslateNonHindiOnLoad
+                        showLanguageWarningBanner = !langDetection.isHindi && it.autoTranslateNonHindiOnLoad,
+                        isLoadingSubtitles = false,
+                        statusMessage = "Loaded ${parsedItems.size} subtitles",
+                        subtitleToast = "Loaded ${parsedItems.size} subtitles: ${fileName ?: "subtitles"}"
                     )
                 }
 
@@ -535,6 +971,14 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to parse SRT: ${e.message}", e)
+                val msg = "Failed to parse subtitle: ${e.message}"
+                _uiState.update {
+                    it.copy(
+                        isLoadingSubtitles = false,
+                        statusMessage = msg,
+                        subtitleToast = msg
+                    )
+                }
             }
         }
     }
@@ -943,6 +1387,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
     // --- Multi-language Subtitle Reader (standalone, works with/without video) ---
 
     private var subtitleReaderJob: Job? = null
+    private var readerStopRequested = false
 
     fun showOfflineSubtitleReaderDialog(show: Boolean) {
         _uiState.update { it.copy(showOfflineSubtitleReaderDialog = show) }
@@ -964,41 +1409,56 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
     fun startSubtitleReader(fromIndex: Int = 0) {
         val cues = _uiState.value.parsedSubtitles
         if (cues.isEmpty()) {
-            _uiState.update { it.copy(statusMessage = "Pehle Add Subtitle se .srt file jodo") }
+            val msg = "Pehle Add Subtitles se .srt file jodo"
+            _uiState.update { it.copy(statusMessage = msg, subtitleToast = msg) }
             return
         }
         stopSubtitleReader(keepStatus = true)
+        readerStopRequested = false
         val startIdx = fromIndex.coerceIn(0, cues.size - 1)
-        _uiState.update { it.copy(isSubtitleReaderPlaying = true, readingSubtitleIndex = startIdx) }
+        _uiState.update {
+            it.copy(
+                isSubtitleReaderPlaying = true,
+                readingSubtitleIndex = startIdx,
+                subtitleToast = "Reader shuru — dialogue ${startIdx + 1}/${cues.size}"
+            )
+        }
         subtitleReaderJob = viewModelScope.launch {
+            var spokenAny = false
             try {
                 var idx = startIdx
                 while (isActive) {
-                    val state = _uiState.value
-                    val items = state.parsedSubtitles
+                    val items = _uiState.value.parsedSubtitles
                     if (idx < 0 || idx >= items.size) break
                     _uiState.update { it.copy(readingSubtitleIndex = idx) }
                     val cue = items[idx]
-                    speakSubtitleCue(cue)
-                    if (!state.isSubtitleReaderContinuous) break
-                    // Wait for speech + user-configured gap before next cue.
-                    val rate = try {
-                        rateForCue(cue, state, state.speechTextCache[cue.index] ?: cue.text)
-                    } catch (_: Exception) { 1.0f }
-                    val estMs = ((cue.text.length * 90L) / rate.coerceAtLeast(0.5f).toLong())
-                        .coerceIn(1200L, 12000L) + (state.subtitleReaderDelaySeconds * 1000L).toLong()
-                    delay(estMs)
+                    // Wait for actual speech completion (not a guessed timer),
+                    // so slow/long dialogues are never skipped.
+                    if (speakCueAndAwait(cue)) spokenAny = true
+                    if (!_uiState.value.isSubtitleReaderContinuous) break
+                    val gapMs = (_uiState.value.subtitleReaderDelaySeconds * 1000L).toLong()
+                    if (gapMs > 0) delay(gapMs)
                     idx++
-                    if (idx >= items.size) break
                 }
-            } catch (_: CancellationException) {
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Subtitle reader failed: ${e.message}", e)
             } finally {
                 _uiState.update { it.copy(isSubtitleReaderPlaying = false) }
+                if (!spokenAny && !readerStopRequested) {
+                    _uiState.update {
+                        it.copy(
+                            subtitleToast = "Reader ne kuch nahi bola — offline voice data install karo ya Voice Profiles se doosri awaaz chuno."
+                        )
+                    }
+                }
             }
         }
     }
 
     fun stopSubtitleReader(keepStatus: Boolean = false) {
+        readerStopRequested = true
         subtitleReaderJob?.cancel()
         subtitleReaderJob = null
         try {
@@ -1014,6 +1474,34 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
     fun toggleSubtitleReader() {
         if (_uiState.value.isSubtitleReaderPlaying) stopSubtitleReader()
         else startSubtitleReader(_uiState.value.readingSubtitleIndex.coerceAtLeast(0))
+    }
+
+    /**
+     * Speaks one line through the exact same offline path as the reader, so the
+     * user can verify audio works with internet off. Reports the outcome.
+     */
+    fun testVoiceOutput() {
+        viewModelScope.launch {
+            _uiState.update { it.copy(subtitleToast = "Voice test chal raha hai…") }
+            val sample = _uiState.value.parsedSubtitles.firstOrNull { it.text.isNotBlank() }
+                ?: SrtItem(
+                    index = 0,
+                    startTimeMs = 0L,
+                    endTimeMs = 8_000L,
+                    text = "नमस्ते! यह ऑफ़लाइन आवाज़ का टेस्ट है।"
+                )
+            val ok = speakCueAndAwait(sample)
+            val voiceName = tts?.voice?.name?.substringAfterLast(':') ?: "default"
+            _uiState.update {
+                it.copy(
+                    subtitleToast = if (ok) {
+                        "Voice OK ($voiceName) — offline audio chal raha hai."
+                    } else {
+                        "Voice fail — Settings > Text-to-speech me offline voice data install karo."
+                    }
+                )
+            }
+        }
     }
 
     fun setGenderVoiceMode(mode: GenderVoiceMode) {
@@ -1331,13 +1819,28 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
             } catch (_: Exception) {
             }
             _uiState.update { it.copy(showSrtHistoryDialog = false) }
-            loadSrtText(entry.rawContent, entry.fileName)
+            val content = try {
+                srtHistoryRepo.fullContentFor(entry)
+            } catch (_: Exception) {
+                null
+            }
+            if (content.isNullOrBlank()) {
+                _uiState.update {
+                    it.copy(statusMessage = "History file mil nahi rahi — dobara import karo.")
+                }
+                return@launch
+            }
+            loadSrtText(content, entry.fileName)
         }
     }
 
     fun deleteHistoryEntry(entry: SrtHistoryEntity) {
         viewModelScope.launch {
             try {
+                val path = entry.filePathOrUri
+                if (!path.isNullOrBlank() && !path.startsWith("content://")) {
+                    File(path).takeIf { it.exists() }?.delete()
+                }
                 srtHistoryRepo.deleteHistory(entry.id)
             } catch (e: Exception) {
                 Log.e(TAG, "Delete history failed: ${e.message}", e)
@@ -1476,11 +1979,10 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         } catch (_: Exception) {
         }
         ensureOfflineVoiceApplied(_uiState.value)
+        val msg = if (next) "Offline voice ON — bina internet ke awaaz"
+        else "Online voice ON — best quality (internet chahiye)"
         _uiState.update {
-            it.copy(
-                statusMessage = if (next) "Offline voice ON — bina internet ke awaaz"
-                else "Online voice ON — best quality (internet chahiye)"
-            )
+            it.copy(statusMessage = msg, subtitleToast = msg)
         }
     }
 
@@ -1733,10 +2235,18 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
             val state = _uiState.value
             ensureOfflineVoiceApplied(state)
             var speechText = text
-            if (!state.isSpokenLangSupported && DevanagariTransliteration.hasDevanagari(speechText)) {
+            var romanized = false
+            val offlineVoiceMissing = state.preferOfflineVoice &&
+                !hasInstalledOfflineVoiceFor(state, state.appLanguage.code)
+            if ((!state.isSpokenLangSupported || offlineVoiceMissing) &&
+                DevanagariTransliteration.hasDevanagari(speechText)
+            ) {
                 speechText = DevanagariTransliteration.toPhoneticRoman(speechText)
+                romanized = speechText.isNotBlank()
             }
-            ttsInstance.setPitch(pitchForCue(cue, state))
+            ensureOfflineAudibleLocale(state, romanized)
+            val exportPitch = if (state.isSingleDeepVoiceOnly) DEEP_NARRATOR_PITCH else pitchForCue(cue, state)
+            ttsInstance.setPitch(exportPitch)
             ttsInstance.setSpeechRate(rateForCue(cue, state, speechText).coerceIn(0.5f, 2.0f))
             if (outFile.exists()) outFile.delete()
             suspendCancellableCoroutine { cont ->
@@ -1787,5 +2297,8 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
 
     companion object {
         private const val TAG = "TtsViewModel"
+        private const val MAX_SUBTITLE_BYTES = 40L * 1024 * 1024
+        private const val SPEECH_CACHE_MAX_CUES = 20_000
+        private const val DEEP_NARRATOR_PITCH = 0.72f
     }
 }

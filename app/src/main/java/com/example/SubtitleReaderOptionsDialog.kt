@@ -56,6 +56,8 @@ fun SubtitleReaderOptionsDialog(
     onDelayChange: (Float) -> Unit,
     onStartReader: () -> Unit,
     onStopReader: () -> Unit,
+    onTestVoice: () -> Unit,
+    onInstallHindiVoice: () -> Unit,
     onOpenVoiceProfiles: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -165,6 +167,73 @@ fun SubtitleReaderOptionsDialog(
                                     )
                                 }
                             }
+                        }
+                    }
+                }
+
+                // Hindi (Devanagari) offline voice status + one-tap installer
+                Surface(
+                    onClick = onInstallHindiVoice,
+                    shape = RoundedCornerShape(10.dp),
+                    color = if (uiState.isHindiOfflineVoiceAvailable) {
+                        Color(0xFF10B981).copy(alpha = 0.12f)
+                    } else {
+                        Color(0xFFFFB300).copy(alpha = 0.16f)
+                    },
+                    border = BorderStroke(
+                        1.dp,
+                        if (uiState.isHindiOfflineVoiceAvailable) Color(0xFF10B981)
+                        else Color(0xFFFFB300)
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("reader_hindi_voice_row")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = if (uiState.isHindiOfflineVoiceAvailable) {
+                                Icons.Default.Check
+                            } else {
+                                Icons.Default.RecordVoiceOver
+                            },
+                            contentDescription = null,
+                            tint = if (uiState.isHindiOfflineVoiceAvailable) Color(0xFF10B981)
+                            else Color(0xFFFFB300),
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (uiState.isHindiOfflineVoiceAvailable) {
+                                    "Hindi offline voice installed"
+                                } else {
+                                    "Hindi offline voice install karo"
+                                },
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp
+                            )
+                            Text(
+                                text = if (uiState.isHindiOfflineVoiceAvailable) {
+                                    "Devanagari klar sunai dega — bina internet"
+                                } else {
+                                    "Tap karo → Hindi voice data download → wapas aao"
+                                },
+                                fontSize = 10.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        if (!uiState.isHindiOfflineVoiceAvailable) {
+                            Text(
+                                text = "INSTALL",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFFFB300)
+                            )
                         }
                     }
                 }
@@ -310,6 +379,13 @@ fun SubtitleReaderOptionsDialog(
                         Spacer(modifier = Modifier.width(4.dp))
                         Text("Read", fontWeight = FontWeight.Bold)
                     }
+                }
+                OutlinedButton(
+                    onClick = onTestVoice,
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.testTag("reader_test_voice_btn")
+                ) {
+                    Text("Test", fontSize = 12.sp)
                 }
                 OutlinedButton(
                     onClick = onOpenVoiceProfiles,
