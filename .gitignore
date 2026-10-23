@@ -16,3 +16,13 @@ screenshots/
 .opencode-web/
 
 node_modules/
+
+desktop/renderer/
+
+desktop/test/out/
+
+release/win-unpacked/
+
+release/*.blockmap
+
+release/builder-debug.yml

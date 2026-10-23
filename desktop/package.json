@@ -1,0 +1,59 @@
+{
+  "name": "srt-video-player-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SRT Video Player for Windows - smart subtitles, sync controls and Hindi dubbing",
+  "author": "SRT Video Player",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/eshandey2011-crypto/PlayGround.git"
+  },
+  "main": "main.cjs",
+  "scripts": {
+    "prepare:renderer": "node build/prepare.mjs",
+    "icon": "node build/make-icon.mjs",
+    "start": "npm run prepare:renderer && electron .",
+    "smoke": "npm run prepare:renderer && electron test/smoke.cjs",
+    "dist:win": "npm run prepare:renderer && electron-builder --win --x64 --publish never"
+  },
+  "devDependencies": {
+    "electron": "45.0.0",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "com.srtvideoplayer.desktop",
+    "productName": "SRT Video Player",
+    "asar": true,
+    "compression": "maximum",
+    "electronLanguages": [
+      "en-US",
+      "hi"
+    ],
+    "directories": {
+      "output": "../release",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.cjs",
+      "renderer/**/*",
+      "build/icon.png",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "artifactName": "SRT-Video-Player-${version}-win-x64.${ext}"
+    },
+    "portable": {
+      "artifactName": "SRT-Video-Player-${version}-win-x64.${ext}"
+    }
+  }
+}
