@@ -692,6 +692,36 @@
     reader.readAsText(file, 'utf-8')
   }
 
+  const VIDEO_FILE = /\.(mp4|webm|m4v|mov|mkv|ogv|avi)$/i
+  const SUBTITLE_FILE = /\.(srt|vtt|txt)$/i
+
+  function loadLocalVideo(file) {
+    if (objectUrl) URL.revokeObjectURL(objectUrl)
+    objectUrl = URL.createObjectURL(file)
+    video.src = objectUrl
+    video.poster = track.poster
+    video.load()
+    $('videoTitle').textContent = file.name.replace(/\.[^.]+$/, '')
+    $('videoMeta').textContent = `${file.type || 'Local video'} · on-device`
+    showScreen('player')
+    video.play().catch(() => {})
+    toast('Video loaded from this device', 'info')
+  }
+
+  function handleDroppedFiles(fileList) {
+    const files = Array.from(fileList || [])
+    if (!files.length) return
+    const videoFile = files.find(file => (file.type && file.type.startsWith('video/')) || VIDEO_FILE.test(file.name))
+    const subtitleFile = files.find(file => SUBTITLE_FILE.test(file.name) || (file.type && file.type.startsWith('text/')))
+    if (videoFile) loadLocalVideo(videoFile)
+    if (subtitleFile) readFileText(subtitleFile, (text, name) => applyLoadedSubtitle(text, name))
+    if (!videoFile && !subtitleFile) {
+      toast('Drop a video or a .srt / .vtt subtitle file', 'warn')
+      return
+    }
+    showScreen('player')
+  }
+
   function bind() {
     $('themeToggle').addEventListener('click', () => setTheme(root.dataset.theme === 'dark' ? 'light' : 'dark'))
     $('langToggle').addEventListener('click', () => { uiLang = uiLang === 'hi' ? 'en' : 'hi'; applyLanguage(); saveSettings() })
@@ -818,20 +848,49 @@
     $('librarySearch').addEventListener('input', filterLibrary)
     $('videoFile').addEventListener('change', e => {
       const file = e.target.files[0]
-      if (!file) return
-      if (objectUrl) URL.revokeObjectURL(objectUrl)
-      objectUrl = URL.createObjectURL(file)
-      video.src = objectUrl
-      video.poster = track.poster
-      video.load()
-      $('videoTitle').textContent = file.name.replace(/\.[^.]+$/, '')
-      $('videoMeta').textContent = `${file.type || 'Local video'} · on-device`
-      video.play().catch(() => {})
-      showScreen('player')
-      toast('Video loaded from this device', 'info')
+      if (file) loadLocalVideo(file)
       e.target.value = ''
     })
     $('moreBtn').addEventListener('click', () => $('helpDialog').showModal())
+
+    const dropOverlay = document.createElement('div')
+    dropOverlay.className = 'drop-overlay'
+    dropOverlay.setAttribute('aria-hidden', 'true')
+    dropOverlay.innerHTML = `
+      <div class="drop-card">
+        <span class="drop-ico"><svg class="ico"><use href="#i-upload"></use></svg></span>
+        <strong>Drop to play</strong>
+        <span>Video + SRT / VTT · वीडियो और सबटाइटल यहाँ छोड़ें</span>
+      </div>`
+    document.body.appendChild(dropOverlay)
+
+    const dragHasFiles = (e) => Boolean(e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files'))
+    let dragDepth = 0
+    const clearDrag = () => { dragDepth = 0; document.body.classList.remove('is-dragging') }
+    window.addEventListener('dragenter', e => {
+      if (!dragHasFiles(e)) return
+      e.preventDefault()
+      dragDepth++
+      document.body.classList.add('is-dragging')
+    })
+    window.addEventListener('dragover', e => {
+      if (!dragHasFiles(e)) return
+      e.preventDefault()
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
+    })
+    window.addEventListener('dragleave', e => {
+      if (!dragHasFiles(e)) return
+      dragDepth = Math.max(0, dragDepth - 1)
+      if (!dragDepth) document.body.classList.remove('is-dragging')
+    })
+    window.addEventListener('drop', e => {
+      if (!dragHasFiles(e)) return
+      e.preventDefault()
+      clearDrag()
+      handleDroppedFiles(e.dataTransfer.files)
+    })
+    window.addEventListener('dragend', clearDrag)
+    window.addEventListener('blur', clearDrag)
 
     document.addEventListener('keydown', e => {
       const tag = (e.target.tagName || '').toLowerCase()

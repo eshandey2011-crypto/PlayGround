@@ -45,9 +45,36 @@ app.whenReady().then(async () => {
       bodyChars: document.body.innerText.length
     }
   })()`)
+  const srt = '1\n00:00:00,000 --> 00:00:02,000\nTest subtitle cue one.\nपरीक्षण उपशीर्षक एक।\n\n2\n00:00:02,000 --> 00:00:04,000\nSecond test cue.\nदूसरा परीक्षण।\n'
+  const overlayVisible = await win.webContents.executeJavaScript(`(() => {
+    const text = ${JSON.stringify(srt)}
+    const file = new File([text], 'drop-test.srt', { type: 'text/plain' })
+    const dataTransfer = new DataTransfer()
+    dataTransfer.items.add(file)
+    window.__dropTestTransfer = dataTransfer
+    window.dispatchEvent(new DragEvent('dragenter', { bubbles: true, cancelable: true, dataTransfer }))
+    return document.body.classList.contains('is-dragging')
+  })()`)
+  await new Promise((resolve) => setTimeout(resolve, 250))
+  const overlayImage = await win.webContents.capturePage()
+  writeFileSync(path.join(outDir, 'smoke-drop.png'), overlayImage.toPNG())
+  const drop = await win.webContents.executeJavaScript(`(async () => {
+    const dataTransfer = window.__dropTestTransfer
+    window.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer }))
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    return {
+      overlayVisible: ${overlayVisible},
+      draggingCleared: !document.body.classList.contains('is-dragging'),
+      cueCount: document.getElementById('cueCount')?.textContent || '',
+      trackFile: document.getElementById('trackFile')?.textContent || '',
+      cueRows: document.querySelectorAll('#cueList .cue').length
+    }
+  })()`)
   const image = await win.webContents.capturePage()
   writeFileSync(path.join(outDir, 'smoke.png'), image.toPNG())
-  console.log(JSON.stringify({ ...state, consoleErrors: errors }, null, 2))
-  const ok = state.ready && state.screen === 'screen-player' && state.bodyChars > 500 && image.getSize().width === 1440
+  const dropOk = drop.overlayVisible && drop.draggingCleared && drop.cueCount === '2' && drop.trackFile === 'drop-test.srt'
+  const imageOk = image.getSize().width >= 1400 && image.getSize().height >= 800
+  const ok = state.ready && state.screen === 'screen-player' && state.bodyChars > 500 && imageOk && dropOk
+  console.log(JSON.stringify({ ...state, drop, image: image.getSize(), dropOk, imageOk, ok, consoleErrors: errors }, null, 2))
   app.exit(ok ? 0 : 1)
 })
