@@ -13,7 +13,10 @@ import android.net.Uri
 import android.os.Environment
 import android.util.Log
 import androidx.core.content.FileProvider
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -463,6 +466,12 @@ object VideoExportManager {
                         onProgress(0.44f + (p * 0.28f), status)
                     }
                 )
+                if (needsAudioMixing && dubbedAudioFile == null) {
+                    return@withContext VideoExportResult(
+                        success = false,
+                        errorMessage = "Audio mixing failed: original video sound and voice track could not be combined. Please try again with a shorter video."
+                    )
+                }
             }
 
             onProgress(0.74f, "Encoding MP4 video with synchronized $targetLanguageLabel audio...")
@@ -485,6 +494,13 @@ object VideoExportManager {
                     if (tempRemuxFile.exists()) tempRemuxFile.delete()
                     if (videoOutputFile.exists()) videoOutputFile.delete()
                 } catch (_: Exception) {}
+                if (needsAudioMixing) {
+                    try { dubbedAudioFile?.delete() } catch (_: Exception) {}
+                    return@withContext VideoExportResult(
+                        success = false,
+                        errorMessage = "Video muxing failed: the mixed audio track could not be written into the MP4. Please try again or use a different video."
+                    )
+                }
                 sourceVideoFile.copyTo(videoOutputFile, overwrite = true)
             }
             try { dubbedAudioFile?.delete() } catch (_: Exception) {}
@@ -507,6 +523,8 @@ object VideoExportManager {
                 durationMs = durationMs,
                 fileSizeBytes = fileSizeBytes
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Video export failed", e)
             VideoExportResult(
@@ -599,7 +617,7 @@ object VideoExportManager {
         return OfflineSubtitleEngine.translateSrtToHindiOffline(srtText)
     }
 
-    private fun remuxVideoWithSubtitles(
+    private suspend fun remuxVideoWithSubtitles(
         sourceVideo: File,
         destVideo: File,
         dubbedAudioFile: File? = null,
@@ -730,6 +748,7 @@ object VideoExportManager {
                             muxer.writeSampleData(videoMuxerTrackIndex, buffer, bufferInfo)
                             totalVideoSamples++
                             if (totalVideoSamples % 25 == 0L) {
+                                currentCoroutineContext().ensureActive()
                                 val progress = (videoTime.toFloat() / maxExpectedDurationUs).coerceIn(0f, 0.95f)
                                 onProgress(progress)
                             }
@@ -771,6 +790,8 @@ object VideoExportManager {
             }
             onProgress(1.0f)
             return totalVideoSamples > 0L
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "MediaMuxer remux encountered error: ${e.message}", e)
             return false
@@ -951,7 +972,8 @@ object VideoExportManager {
             val lastCueEnd = cues.maxOfOrNull { it.endTimeMs } ?: 5000L
             val safeVideoDur = if (videoDurationMs > 0L) videoDurationMs else (lastCueEnd + 2000L)
             val origDurMs = if (origPcm != null && origPcm.isNotEmpty()) (origPcm.size * 1000L) / (targetSampleRate * targetChannels * 2L) else 0L
-            val finalDurationMs = maxOf(safeVideoDur, origDurMs).coerceAtLeast(2000L)
+            val voiceEndMs = cueSegments.maxOfOrNull { it.startMs + it.durationMs } ?: 0L
+            val finalDurationMs = maxOf(safeVideoDur, origDurMs, voiceEndMs).coerceAtLeast(2000L)
             val totalFrames = ((finalDurationMs * targetSampleRate) / 1000L).toInt()
 
             val fullPcmFile = File(synthDir, "full_mixed_timeline_${System.currentTimeMillis()}.pcm")
@@ -979,12 +1001,26 @@ object VideoExportManager {
             val chunkBuffer = ByteArray(chunkFrames * 4)
             var currentChunkOffset = 0
 
+            // Cursor over voice segments. The old code re-scanned every segment
+            // for every audio frame (O(frames x cues)) which made long exports
+            // take hours and look like they never finish.
+            var voiceCursor = 0
+            var framesSinceCancelCheck = 0
             for (frameIdx in 0 until totalFrames) {
+                if (++framesSinceCancelCheck >= chunkFrames) {
+                    framesSinceCancelCheck = 0
+                    ensureActive()
+                }
+                while (voiceCursor < voiceTracks.size && voiceTracks[voiceCursor].endFrame <= frameIdx) {
+                    voiceCursor++
+                }
                 var sumL = 0
                 var sumR = 0
                 var isSpeechActive = false
-                for (seg in voiceTracks) {
-                    if (frameIdx in seg.startFrame until seg.endFrame) {
+                var vi = voiceCursor
+                while (vi < voiceTracks.size && voiceTracks[vi].startFrame <= frameIdx) {
+                    val seg = voiceTracks[vi]
+                    if (frameIdx >= seg.startFrame && frameIdx < seg.endFrame) {
                         isSpeechActive = true
                         val byteOffset = ((frameIdx - seg.startFrame) * 4).toInt()
                         if (byteOffset + 3 < seg.pcm.size) {
@@ -993,9 +1029,8 @@ object VideoExportManager {
                             sumL += sL
                             sumR += sR
                         }
-                    } else if (seg.startFrame > frameIdx + (targetSampleRate * 2)) {
-                        break
                     }
+                    vi++
                 }
                 val voiceL = sumL.coerceIn(-32767, 32767).toShort()
                 val voiceR = sumR.coerceIn(-32767, 32767).toShort()
@@ -1036,7 +1071,7 @@ object VideoExportManager {
                     }
                 }
 
-                val voiceGain = (config.voiceSpeechVolume * 1.35f).coerceAtLeast(0.5f)
+                val voiceGain = (config.voiceSpeechVolume * 1.0f).coerceAtLeast(0.5f)
                 val effectiveBgmGain = if (config.includeTuneBgm) smoothedBgmGain else 0.0f
                 val effectiveOrigGain = if (config.includeOriginalAudio) smoothedOrigGain else 0.0f
 
@@ -1080,6 +1115,8 @@ object VideoExportManager {
             } else {
                 null
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Error building synchronized mixed audio: ${e.message}", e)
             null
@@ -1342,6 +1379,8 @@ object VideoExportManager {
                 durationMs = if (durMs > 0) durMs.coerceAtMost(previewMaxMs) else previewMaxMs,
                 fileSizeBytes = previewVideoFile.length()
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Export preview generation failed", e)
             VideoExportResult(

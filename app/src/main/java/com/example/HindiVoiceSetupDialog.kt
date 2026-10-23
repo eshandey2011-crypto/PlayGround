@@ -130,6 +130,14 @@ fun HindiVoiceSetupDialog(
 
                 Spacer(modifier = Modifier.padding(top = 10.dp))
 
+                Text(
+                    text = uiState.voiceDiagnostics,
+                    fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Spacer(modifier = Modifier.padding(top = 6.dp))
+
                 StepRow("1", "Install Voice Data dabao — engine ka installer khulega.")
                 StepRow("2", "List me Hindi (हिन्दी) chuno aur Download/Update karo.")
                 StepRow("3", "Wapas aakar Refresh dabao — row green ho jayegi.")

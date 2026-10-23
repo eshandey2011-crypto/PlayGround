@@ -3,8 +3,12 @@ package com.example
 import android.app.Application
 import android.content.Context
 import android.content.Intent
+import android.media.AudioAttributes
 import android.media.AudioManager
+import android.net.ConnectivityManager
+import android.net.Network
 import android.net.Uri
+import android.os.Bundle
 import android.provider.Settings
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
@@ -48,51 +52,143 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
 
     private var tts: TextToSpeech? = null
     private var isTtsInitialized = false
+    private var isTtsInitInFlight = false
+    private var ttsInitRetries = 0
     private val bgmAudioEngine = BgmAudioEngine(context)
 
     private var playbackTrackingJob: Job? = null
     private var speechSynthesisJob: Job? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     init {
         initTts()
+        registerNetworkRecovery()
         loadInitialData()
         startPlaybackClock()
     }
 
     private fun initTts() {
+        if (isTtsInitInFlight) return
+        isTtsInitInFlight = true
         try {
+            try { tts?.stop() } catch (_: Exception) {}
+            try { tts?.shutdown() } catch (_: Exception) {}
+            tts = null
+            isTtsInitialized = false
+            _uiState.update { it.copy(voiceDiagnostics = "Starting TTS engine…") }
             tts = TextToSpeech(context, this)
         } catch (e: Exception) {
+            isTtsInitInFlight = false
             Log.e(TAG, "Error initializing TextToSpeech: ${e.message}", e)
             _uiState.update {
                 it.copy(
                     speechState = SpeechState.ERROR,
                     errorMessage = "Failed to initialize TTS engine: ${e.message}",
-                    statusMessage = "TTS Init Error"
+                    statusMessage = "TTS Init Error",
+                    voiceDiagnostics = "TTS engine could not be created: ${e.message}"
                 )
             }
+            scheduleTtsInitRetry()
         }
     }
 
     override fun onInit(status: Int) {
+        isTtsInitInFlight = false
         if (status == TextToSpeech.SUCCESS) {
+            ttsInitRetries = 0
             isTtsInitialized = true
             setupTtsEngine()
         } else {
             isTtsInitialized = false
+            Log.w(TAG, "TTS init failed (status=$status); scheduling retry")
             _uiState.update {
                 it.copy(
                     speechState = SpeechState.ERROR,
                     statusMessage = "TTS Initialization Failed",
-                    errorMessage = "TTS engine could not be initialized on device"
+                    errorMessage = "TTS engine could not be initialized on device",
+                    voiceDiagnostics = "TTS init failed (status=$status). Engine is restarting…"
                 )
             }
+            scheduleTtsInitRetry()
+        }
+    }
+
+    /** Offline devices often fail the first TTS init; retry with backoff. */
+    private fun scheduleTtsInitRetry() {
+        if (ttsInitRetries >= MAX_TTS_INIT_RETRIES) {
+            _uiState.update {
+                it.copy(
+                    voiceDiagnostics = "TTS engine did not start after $MAX_TTS_INIT_RETRIES attempts. Install/select a TTS engine in Settings > Text-to-speech."
+                )
+            }
+            return
+        }
+        ttsInitRetries++
+        val attempt = ttsInitRetries
+        viewModelScope.launch {
+            delay(1000L * attempt)
+            if (!isTtsInitialized) {
+                Log.d(TAG, "Retrying TTS init (attempt $attempt)")
+                initTts()
+            }
+        }
+    }
+
+    /** Rebuilds the engine from scratch (used when speak()/voice binding fails). */
+    private fun restartTtsEngine() {
+        ttsInitRetries = 0
+        initTts()
+    }
+
+    private suspend fun awaitTtsReady(timeoutMs: Long = 6_000L): TextToSpeech? {
+        var waited = 0L
+        while (waited < timeoutMs) {
+            val instance = tts
+            if (instance != null && isTtsInitialized) return instance
+            if (!isTtsInitInFlight && ttsInitRetries == 0) restartTtsEngine()
+            delay(200)
+            waited += 200
+        }
+        return if (isTtsInitialized) tts else null
+    }
+
+    /** Re-inits TTS when connectivity changes (e.g. engine started offline). */
+    private fun registerNetworkRecovery() {
+        try {
+            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            val callback = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    viewModelScope.launch {
+                        if (!isTtsInitialized) {
+                            ttsInitRetries = 0
+                            initTts()
+                        } else {
+                            refreshVoiceData()
+                        }
+                    }
+                }
+            }
+            networkCallback = callback
+            cm?.registerDefaultNetworkCallback(callback)
+        } catch (e: Exception) {
+            Log.w(TAG, "Network recovery callback unavailable: ${e.message}")
         }
     }
 
     private fun setupTtsEngine() {
         val ttsInstance = tts ?: return
         try {
+            // Route speech through media so it is audible even when the device
+            // is in silent/notification mode (common reason for "no voice").
+            try {
+                val attributes = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+                ttsInstance.setAudioAttributes(attributes)
+            } catch (e: Exception) {
+                Log.w(TAG, "TTS audio attributes not supported: ${e.message}")
+            }
             // Voice language follows the selected app language (default Hindi).
             val language = _uiState.value.appLanguage
             val locale = ttsLocaleFor(language)
@@ -161,6 +257,19 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                 }
             }
 
+            val offlineHindi = hasOfflineHindiVoice(availableVoices)
+            val diagnostics = buildString {
+                append("Engine: ")
+                append(ttsInstance.defaultEngine ?: "system")
+                append(" • voices: ")
+                append(availableVoices.size)
+                append(" • Hindi offline: ")
+                append(if (offlineHindi) "yes" else "no")
+                append(" • lang ok: ")
+                append(if (isLangSupported) "yes" else "no (fallback)")
+                chosenVoice?.let { append(" • voice: ${it.name}") }
+            }
+
             _uiState.update {
                 it.copy(
                     speechState = SpeechState.READY,
@@ -168,15 +277,19 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                     else "${language.nativeName} voice missing — fallback active (install ${language.englishName} voice data for best quality)",
                     isHindiSupported = if (language == AppLanguage.HINDI) isLangSupported else it.isHindiSupported,
                     isSpokenLangSupported = isLangSupported,
-                    isHindiOfflineVoiceAvailable = hasOfflineHindiVoice(availableVoices),
+                    isHindiOfflineVoiceAvailable = offlineHindi,
                     ttsEngineLabel = ttsInstance.defaultEngine
                         ?: "System TTS",
+                    voiceDiagnostics = diagnostics,
                     voices = availableVoices,
                     selectedVoice = chosenVoice
                 )
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error configuring TTS: ${e.message}", e)
+            _uiState.update {
+                it.copy(voiceDiagnostics = "TTS configuration error: ${e.message}")
+            }
         }
     }
 
@@ -308,6 +421,11 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
      * Shared cue -> speech preparation (text, pitch, rate). Returns null when
      * the cue must stay silent (muted, stale, blank).
      */
+    /** Normal, soft narrator loudness (engines that support KEY_PARAM_VOLUME). */
+    private fun softSpeechParams(): Bundle = Bundle().apply {
+        putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, NARRATOR_SOFT_VOLUME)
+    }
+
     private fun prepareUtterance(
         cue: SrtItem,
         state: TtsUiState,
@@ -319,7 +437,13 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
 
         ensureOfflineVoiceApplied(state)
 
-        var targetText = state.speechTextCache[cue.index]
+        var targetText = if (readerMode && state.isVerbatimSubtitleReading) {
+            // Same-to-same: read the cue EXACTLY as written (full text, no
+            // translation/paraphrase/speaker stripping).
+            cue.text
+        } else {
+            state.speechTextCache[cue.index]
+        }
         if (targetText.isNullOrBlank()) {
             targetText = if (state.appLanguage == AppLanguage.HINDI || state.isOfflineHindiVoiceInSubtitles) {
                 if (isDevanagari(cue.text)) cue.text else OfflineSubtitleEngine.translateLineToHindi(cue.text)
@@ -348,9 +472,9 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
             if (state.videoPositionMs > cue.endTimeMs + 1500L) return null
         }
 
-        // Deep Hindi narrator: single-deep mode (default) pins the pitch low so
-        // the offline voice always sounds like a calm male narrator.
-        val basePitch = if (state.isSingleDeepVoiceOnly) DEEP_NARRATOR_PITCH else pitchForCue(cue, state)
+        // Calm narrator: normal-ish pitch with slightly reduced volume so it
+        // sounds soft instead of the old artificially deep 0.72 voice.
+        val basePitch = if (state.isSingleDeepVoiceOnly) NARRATOR_SOFT_PITCH else pitchForCue(cue, state)
 
         return PreparedUtterance(
             text = targetText,
@@ -413,10 +537,16 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
             if (!romanizedFallback) {
                 // Native text is speakable; make sure a deep voice matches it.
                 val native = pickDeepOfflineVoice(state.voices, state.appLanguage.code)?.rawVoice
-                if (native != null && ttsInstance.voice?.name != native.name) {
-                    ttsInstance.voice = native
+                if (native != null) {
+                    try {
+                        if (ttsInstance.voice?.name != native.name) ttsInstance.voice = native
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Offline native voice apply failed: ${e.message}")
+                    }
+                    return
                 }
-                return
+                // No installed voice for the selected language: fall through to
+                // the fallback chain instead of leaving a missing-data locale.
             }
             // Romanized fallback: Hindi offline deep voice first (it reads Roman
             // text fine), then device language, then English, then anything.
@@ -464,51 +594,67 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
      * the old fixed-delay timer skipped cues whenever speech ran slower.
      */
     private suspend fun speakCueAndAwait(cue: SrtItem): Boolean {
-        // TTS init is async; give it a moment instead of silently skipping cues.
-        var waited = 0L
-        while ((tts == null || !isTtsInitialized) && waited < 3_000L) {
-            delay(150)
-            waited += 150
-        }
-        val ttsInstance = tts
-        if (ttsInstance == null || !isTtsInitialized) {
-            _uiState.update {
-                it.copy(subtitleToast = "TTS engine ready nahi hai — thodi der baad phir Start dabao.")
-            }
-            return false
-        }
-
         val prepared = prepareUtterance(cue, _uiState.value, readerMode = true) ?: return false
-        ensureOfflineAudibleLocale(_uiState.value, prepared.romanizedFallback)
-        val utteranceId = "reader_${cue.index}_${System.currentTimeMillis()}"
-        val done = CompletableDeferred<Boolean>()
-        speechCompletions[utteranceId] = done
-        return try {
-            ttsInstance.setPitch(prepared.pitch)
-            ttsInstance.setSpeechRate(prepared.speed)
-            // QUEUE_FLUSH: reader owns the engine; no stale cue backlog.
-            val result = ttsInstance.speak(
-                prepared.text,
-                TextToSpeech.QUEUE_FLUSH,
-                null,
-                utteranceId
-            )
-            if (result != TextToSpeech.SUCCESS) {
-                speechCompletions.remove(utteranceId)
-                _uiState.update {
-                    it.copy(subtitleToast = "Voice start nahi hui — offline voice data install karo.")
+        var attempt = 0
+        while (attempt < 2) {
+            // TTS init is async; give it a moment instead of silently skipping cues.
+            val ttsInstance = awaitTtsReady(if (attempt == 0) 6_000L else 10_000L)
+            if (ttsInstance == null) {
+                attempt++
+                if (attempt < 2) {
+                    restartTtsEngine()
+                    delay(500)
                 }
-                return false
+                continue
             }
-            // Timeout scales with text length so long lines are never cut off.
-            val timeoutMs = (prepared.text.length * 200L + 5_000L).coerceIn(8_000L, 90_000L)
-            withTimeoutOrNull(timeoutMs) { done.await() } ?: false
-        } catch (e: Exception) {
-            Log.e(TAG, "Reader speech failed: ${e.message}", e)
-            false
-        } finally {
-            speechCompletions.remove(utteranceId)
+            ensureOfflineVoiceApplied(_uiState.value)
+            ensureOfflineAudibleLocale(_uiState.value, prepared.romanizedFallback)
+            val utteranceId = "reader_${cue.index}_${System.currentTimeMillis()}_$attempt"
+            val done = CompletableDeferred<Boolean>()
+            speechCompletions[utteranceId] = done
+            var completed = false
+            try {
+                ttsInstance.setPitch(prepared.pitch)
+                ttsInstance.setSpeechRate(prepared.speed)
+                // QUEUE_FLUSH: reader owns the engine; no stale cue backlog.
+                val result = ttsInstance.speak(
+                    prepared.text,
+                    TextToSpeech.QUEUE_FLUSH,
+                    softSpeechParams(),
+                    utteranceId
+                )
+                if (result == TextToSpeech.SUCCESS) {
+                    // Timeout scales with text length so long lines are never cut off.
+                    val timeoutMs = (prepared.text.length * 200L + 5_000L).coerceIn(8_000L, 90_000L)
+                    completed = withTimeoutOrNull(timeoutMs) { done.await() } ?: false
+                } else {
+                    Log.w(TAG, "tts.speak() returned $result; restarting engine")
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Reader speech failed: ${e.message}", e)
+            } finally {
+                speechCompletions.remove(utteranceId)
+            }
+            if (completed) return true
+            attempt++
+            if (attempt < 2) {
+                // Offline engines sometimes need a fresh instance before they
+                // accept speech again (especially after data was installed).
+                restartTtsEngine()
+                delay(500)
+            }
         }
+        _uiState.update {
+            it.copy(
+                subtitleToast = "Voice start nahi hui — offline voice data install karo ya TTS engine restart karo.",
+                voiceDiagnostics = "Reader could not start speech after 2 attempts. Check selected voice: ${
+                    _uiState.value.selectedVoice?.name ?: "engine default"
+                }"
+            )
+        }
+        return false
     }
 
     private fun loadInitialData() {
@@ -627,10 +773,10 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                 ttsInstance.setSpeechRate(prepared.speed)
 
                 val utteranceId = "cue_${cue.index}_${System.currentTimeMillis()}"
-                // QUEUE_ADD: har dialogue POORA bolega, beech me nahi katega.
-                // 3-sec pre-roll + finish-before-end rate se timeline match rehta hai;
-                // stale guard upar backlog rokta hai taaki awaaz late na ho.
-                ttsInstance.speak(prepared.text, TextToSpeech.QUEUE_ADD, null, utteranceId)
+                // Same-to-same timing: flush any leftover speech so this cue
+                // starts exactly at its subtitle start time instead of queueing
+                // behind an overrunning previous line.
+                ttsInstance.speak(prepared.text, TextToSpeech.QUEUE_FLUSH, softSpeechParams(), utteranceId)
             } catch (e: Exception) {
                 Log.e(TAG, "Error in speakSubtitleCue: ${e.message}", e)
             }
@@ -1258,7 +1404,16 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
     }
 
     fun toggleSameToSameTimeDelivery(enabled: Boolean) {
-        _uiState.update { it.copy(isSameToSameTimeDelivery = enabled, isFastSubtitleSpeechEnabled = enabled) }
+        _uiState.update {
+            it.copy(
+                isSameToSameTimeDelivery = enabled,
+                isFastSubtitleSpeechEnabled = enabled,
+                // 1:1 delivery means the voice starts exactly when the cue
+                // appears; disable the old 3s pre-roll.
+                dialogueLeadTimeMs = if (enabled) 0L else 3000L,
+                lastSpokenSubtitleIndex = -1
+            )
+        }
     }
 
     fun lockSameToSameSync() {
@@ -1403,6 +1558,22 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
 
     fun setSubtitleReaderContinuous(continuous: Boolean) {
         _uiState.update { it.copy(isSubtitleReaderContinuous = continuous) }
+    }
+
+    /** Same-to-same: read every cue exactly as written, in full. */
+    fun toggleVerbatimSubtitleReading() {
+        _uiState.update { it.copy(isVerbatimSubtitleReading = !it.isVerbatimSubtitleReading) }
+    }
+
+    fun setVerbatimSubtitleReading(enabled: Boolean) {
+        _uiState.update { it.copy(isVerbatimSubtitleReading = enabled) }
+    }
+
+    /** One-tap: enable same-to-same and start reading from the first cue. */
+    fun startVerbatimReader() {
+        setVerbatimSubtitleReading(true)
+        _uiState.update { it.copy(isSubtitleReaderContinuous = true) }
+        startSubtitleReader(_uiState.value.readingSubtitleIndex.coerceAtLeast(0))
     }
 
     /** Starts reading loaded subtitles aloud in the selected reader language. */
@@ -2009,9 +2180,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         _uiState.update {
             it.copy(
                 isPerfectTimingEnabled = enabled,
-                dialogueLeadTimeMs = if (enabled) {
-                    if (it.dialogueLeadTimeMs <= 0L) 3000L else it.dialogueLeadTimeMs
-                } else 0L
+                dialogueLeadTimeMs = if (enabled) 0L else it.dialogueLeadTimeMs
             )
         }
     }
@@ -2025,7 +2194,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
             it.copy(
                 soundTrackSyncDelayMs = 0L,
                 subtitleOffsetMs = 0L,
-                dialogueLeadTimeMs = 3000L,
+                dialogueLeadTimeMs = 0L,
                 isPerfectTimingEnabled = true,
                 lastSpokenSubtitleIndex = -1
             )
@@ -2056,11 +2225,11 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
     private fun pitchForCue(cue: SrtItem, state: TtsUiState): Float {
         if (state.genderVoiceMode != GenderVoiceMode.AUTO_MULTI_SPEAKER) {
             return when (state.genderVoiceMode) {
-                GenderVoiceMode.SINGLE_DEEP_VOICE -> 0.72f
+                GenderVoiceMode.SINGLE_DEEP_VOICE -> 0.9f
                 GenderVoiceMode.FORCE_MALE -> 0.85f
                 GenderVoiceMode.FORCE_FEMALE -> 1.28f
                 GenderVoiceMode.FORCE_CHILD -> 1.48f
-                GenderVoiceMode.FORCE_NARRATOR -> 0.92f
+                GenderVoiceMode.FORCE_NARRATOR -> 0.95f
                 else -> 1.0f
             }
         }
@@ -2069,7 +2238,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                 SpeakerGender.FEMALE -> 1.28f
                 SpeakerGender.MALE -> 0.85f
                 SpeakerGender.CHILD -> 1.45f
-                SpeakerGender.NARRATOR -> 0.92f
+                SpeakerGender.NARRATOR -> 0.95f
                 else -> 1.0f
             }
         } catch (_: Exception) {
@@ -2122,6 +2291,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
     fun cancelVideoExport() {
         exportJob?.cancel()
         exportJob = null
+        ExportForegroundService.stop(context)
         attachTtsListener()
         _uiState.update {
             it.copy(isExportingVideo = false, videoExportStatus = "Export cancelled")
@@ -2165,16 +2335,22 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                 exportedSrtFilePath = null
             )
         }
+        ExportForegroundService.start(context)
         exportJob = viewModelScope.launch {
             try {
                 val snap = _uiState.value
                 val config = VideoExportConfig(
                     includeHindiDubbing = true,
-                    includeOriginalAudio = !snap.isVideoMuted,
+                    // Export always mixes the original video sound with the dub.
+                    // Playback mute is a preview preference, not an export one;
+                    // only an explicitly zero volume removes the original track.
+                    includeOriginalAudio = snap.videoVolume > 0.01f,
                     originalAudioVolume = snap.videoVolume.coerceIn(0f, 1f),
                     voiceSpeechVolume = if (snap.isDubbingMuted) 0f else snap.dubbingVolume.coerceIn(0f, 1f),
                     includeTuneBgm = snap.isBgmEnabled,
                     bgmVolume = snap.bgmVolume.coerceIn(0f, 1f),
+                    isDuckingEnabled = true,
+                    duckingRatio = 0.6f,
                     subtitleFontSizeSp = snap.subtitleFontSize,
                     outputFileName = snap.videoTitle
                 )
@@ -2190,9 +2366,11 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                     synthesizer = { cue, text, outFile -> synthesizeCueToFile(cue, text, outFile) },
                     onProgress = { p, msg ->
                         _uiState.update { it.copy(videoExportProgress = p.coerceIn(0f, 1f), videoExportStatus = msg) }
+                        ExportForegroundService.update(context, p, msg)
                     }
                 )
                 attachTtsListener()
+                ExportForegroundService.stop(context)
                 if (result.success) {
                     _uiState.update {
                         it.copy(
@@ -2215,11 +2393,13 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                 }
             } catch (e: CancellationException) {
                 attachTtsListener()
+                ExportForegroundService.stop(context)
                 _uiState.update { it.copy(isExportingVideo = false, videoExportStatus = "Export cancelled") }
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Export crashed: ${e.message}", e)
                 attachTtsListener()
+                ExportForegroundService.stop(context)
                 _uiState.update {
                     it.copy(isExportingVideo = false, videoExportStatus = "Export failed", videoExportError = e.message)
                 }
@@ -2245,7 +2425,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                 romanized = speechText.isNotBlank()
             }
             ensureOfflineAudibleLocale(state, romanized)
-            val exportPitch = if (state.isSingleDeepVoiceOnly) DEEP_NARRATOR_PITCH else pitchForCue(cue, state)
+            val exportPitch = if (state.isSingleDeepVoiceOnly) NARRATOR_SOFT_PITCH else pitchForCue(cue, state)
             ttsInstance.setPitch(exportPitch)
             ttsInstance.setSpeechRate(rateForCue(cue, state, speechText).coerceIn(0.5f, 2.0f))
             if (outFile.exists()) outFile.delete()
@@ -2267,7 +2447,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
                     }
                 })
                 val rc = try {
-                    ttsInstance.synthesizeToFile(speechText, null, outFile, exportUtteranceId)
+                    ttsInstance.synthesizeToFile(speechText, softSpeechParams(), outFile, exportUtteranceId)
                 } catch (_: Exception) {
                     TextToSpeech.ERROR
                 }
@@ -2290,6 +2470,13 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         playbackTrackingJob?.cancel()
         speechSynthesisJob?.cancel()
         subtitleReaderJob?.cancel()
+        ExportForegroundService.stop(context)
+        try {
+            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            networkCallback?.let { cm?.unregisterNetworkCallback(it) }
+        } catch (_: Exception) {
+        }
+        networkCallback = null
         tts?.stop()
         tts?.shutdown()
         bgmAudioEngine.stop()
@@ -2299,6 +2486,8 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         private const val TAG = "TtsViewModel"
         private const val MAX_SUBTITLE_BYTES = 40L * 1024 * 1024
         private const val SPEECH_CACHE_MAX_CUES = 20_000
-        private const val DEEP_NARRATOR_PITCH = 0.72f
+        private const val NARRATOR_SOFT_PITCH = 0.95f
+        private const val NARRATOR_SOFT_VOLUME = 0.85f
+        private const val MAX_TTS_INIT_RETRIES = 5
     }
 }

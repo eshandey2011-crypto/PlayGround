@@ -53,6 +53,7 @@ fun SubtitleReaderOptionsDialog(
     onSelectLanguage: (AppLanguage) -> Unit,
     onToggleOfflineVoice: () -> Unit,
     onToggleContinuous: () -> Unit,
+    onToggleVerbatim: () -> Unit,
     onDelayChange: (Float) -> Unit,
     onStartReader: () -> Unit,
     onStopReader: () -> Unit,
@@ -311,6 +312,52 @@ fun SubtitleReaderOptionsDialog(
                             checked = uiState.isSubtitleReaderContinuous,
                             onCheckedChange = { onToggleContinuous() },
                             modifier = Modifier.testTag("reader_continuous_switch")
+                        )
+                    }
+                }
+
+                // Same-to-same (verbatim) reading row
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = if (uiState.isVerbatimSubtitleReading) {
+                        Color(0xFF10B981).copy(alpha = 0.12f)
+                    } else {
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                    },
+                    border = BorderStroke(
+                        1.dp,
+                        if (uiState.isVerbatimSubtitleReading) Color(0xFF10B981)
+                        else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Same-to-same (jaisa likha hai)",
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 12.sp
+                            )
+                            Text(
+                                text = if (uiState.isVerbatimSubtitleReading) {
+                                    "Har line poori, bina translate — exact subtitle text"
+                                } else {
+                                    "Hindi translate/short karke padhta hai"
+                                },
+                                fontSize = 10.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = uiState.isVerbatimSubtitleReading,
+                            onCheckedChange = { onToggleVerbatim() },
+                            modifier = Modifier.testTag("reader_verbatim_switch")
                         )
                     }
                 }

@@ -694,6 +694,7 @@ fun MainAppScreen(
             onSelectLanguage = { ttsViewModel.setAppLanguage(it) },
             onToggleOfflineVoice = { ttsViewModel.togglePreferOfflineVoice() },
             onToggleContinuous = { ttsViewModel.toggleSubtitleReaderContinuous() },
+            onToggleVerbatim = { ttsViewModel.toggleVerbatimSubtitleReading() },
             onDelayChange = { ttsViewModel.setSubtitleReaderDelay(it) },
             onStartReader = { ttsViewModel.startSubtitleReader() },
             onStopReader = { ttsViewModel.stopSubtitleReader() },
