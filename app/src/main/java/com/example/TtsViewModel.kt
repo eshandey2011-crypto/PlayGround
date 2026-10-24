@@ -445,10 +445,11 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
             state.speechTextCache[cue.index]
         }
         if (targetText.isNullOrBlank()) {
+            val baseText = cue.cleanSpokenText.ifBlank { cue.text }
             targetText = if (state.appLanguage == AppLanguage.HINDI || state.isOfflineHindiVoiceInSubtitles) {
-                if (isDevanagari(cue.text)) cue.text else OfflineSubtitleEngine.translateLineToHindi(cue.text)
+                if (isDevanagari(baseText)) baseText else OfflineSubtitleEngine.translateLineToHindi(baseText)
             } else {
-                cue.cleanSpokenText.ifBlank { cue.text }
+                baseText
             }
         }
 
@@ -719,8 +720,8 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         val state = _uiState.value
         val effectivePosition = positionMs + state.soundTrackSyncDelayMs
         val parsed = state.parsedSubtitles
-        // Lead-time pre-roll: voice starts 3 sec BEFORE the cue appears,
-        // and must finish before the paragraph ends.
+        // Story pre-roll: default 2s, so the narrator speaks each subtitle
+        // before it appears on screen. 0 = same-to-same timing.
         val leadMs = state.dialogueLeadTimeMs.coerceIn(0L, 5000L)
 
         // Find active subtitle cue (lead window for voice, exact window for display).
@@ -730,53 +731,65 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
             effectivePosition in cue.startTimeMs..cue.endTimeMs
         }
         val activeCue = parsed.getOrNull(activeIndex)
-        val upcomingIndex = parsed.indexOfFirst { cue ->
-            effectivePosition in (cue.startTimeMs - leadMs)..cue.endTimeMs
+
+        // Voice delivery: speak cues IN ORDER, starting each one `leadMs`
+        // before its subtitle appears. Looking only at the next unspoken cue
+        // (instead of indexOfFirst over the lead window) is what makes the
+        // pre-roll work for back-to-back subtitles too.
+        var voiceIndex = -1
+        if (state.isOfflineSubtitleMode && !state.isSubtitleReaderPlaying && state.isVideoPlaying) {
+            var idx = (state.lastSpokenSubtitleIndex + 1).coerceAtLeast(0)
+            while (idx < parsed.size && effectivePosition > parsed[idx].endTimeMs + 1500L) {
+                idx++
+            }
+            val candidate = parsed.getOrNull(idx)
+            if (candidate != null && effectivePosition >= candidate.startTimeMs - leadMs) {
+                voiceIndex = idx
+            }
         }
-        val upcomingCue = parsed.getOrNull(upcomingIndex)
+        val voiceCue = parsed.getOrNull(voiceIndex)
 
         _uiState.update {
             it.copy(
                 videoPositionMs = positionMs,
                 activeSubtitle = activeCue,
-                lastSpokenSubtitleIndex = if (upcomingCue != null) upcomingIndex else it.lastSpokenSubtitleIndex
+                lastSpokenSubtitleIndex = if (voiceCue != null) voiceIndex else it.lastSpokenSubtitleIndex
             )
         }
 
-        // Offline Subtitle Reader voice delivery (fires on the lead window).
-        // Reader mode owns the TTS engine itself; don't fight it with video cues.
-        if (state.isOfflineSubtitleMode && !state.isSubtitleReaderPlaying &&
-            state.isVideoPlaying && upcomingCue != null && upcomingIndex != state.lastSpokenSubtitleIndex
-        ) {
-            speakSubtitleCue(upcomingCue)
+        if (voiceCue != null) {
+            speakSubtitleCue(voiceCue)
         }
     }
 
     fun speakSubtitleCue(cue: SrtItem) {
-        val ttsInstance = tts
-        if (ttsInstance == null || !isTtsInitialized) {
-            _uiState.update { it.copy(statusMessage = "TTS engine loading — voice will start automatically") }
-            return
-        }
-
         speechSynthesisJob?.cancel()
         speechSynthesisJob = viewModelScope.launch {
             try {
+                // Wait briefly for TTS init so the first cue is not silently lost.
+                val ttsInstance = awaitTtsReady(3_000L)
+                if (ttsInstance == null) {
+                    _uiState.update { it.copy(statusMessage = "TTS engine loading — voice will start automatically") }
+                    return@launch
+                }
                 val prepared = prepareUtterance(
                     cue,
                     _uiState.value,
                     readerMode = _uiState.value.isSubtitleReaderPlaying
                 ) ?: return@launch
 
+                ensureOfflineVoiceApplied(_uiState.value)
                 ensureOfflineAudibleLocale(_uiState.value, prepared.romanizedFallback)
                 ttsInstance.setPitch(prepared.pitch)
                 ttsInstance.setSpeechRate(prepared.speed)
 
                 val utteranceId = "cue_${cue.index}_${System.currentTimeMillis()}"
-                // Same-to-same timing: flush any leftover speech so this cue
-                // starts exactly at its subtitle start time instead of queueing
-                // behind an overrunning previous line.
-                ttsInstance.speak(prepared.text, TextToSpeech.QUEUE_FLUSH, softSpeechParams(), utteranceId)
+                // Story narration: QUEUE_ADD lets every line finish naturally
+                // (no mid-sentence cut), while the 2s pre-roll keeps the voice
+                // ahead of the on-screen subtitle.
+                ttsInstance.speak(prepared.text, TextToSpeech.QUEUE_ADD, softSpeechParams(), utteranceId)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Error in speakSubtitleCue: ${e.message}", e)
             }
@@ -793,16 +806,19 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
             _uiState.value.isOfflineHindiVoiceInSubtitles
         val map = LinkedHashMap<Int, String>(items.size)
         for (item in items) {
+            // Story narration reads dialogue only: speaker tags like
+            // "[Rahul]:" are stripped so the narrator never announces them.
+            val baseText = item.cleanSpokenText.ifBlank { item.text }
             val spoken = if (!hindiMode) {
                 // Multi-language mode: speak subtitles in the selected language as-is.
-                item.cleanSpokenText.ifBlank { item.text }
-            } else if (isDevanagari(item.text)) {
-                item.text
+                baseText
+            } else if (isDevanagari(baseText)) {
+                baseText
             } else {
                 try {
-                    OfflineSubtitleEngine.translateLineToHindi(item.text)
+                    OfflineSubtitleEngine.translateLineToHindi(baseText)
                 } catch (_: Exception) {
-                    item.text
+                    baseText
                 }
             }
             if (spoken.isNotBlank()) map[item.index] = spoken
@@ -1356,8 +1372,11 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         } catch (_: Exception) {
         }
         val clamped = positionMs.coerceIn(0L, _uiState.value.videoDurationMs.coerceAtLeast(1000L))
+        // Re-arm narration from the cue at the new position: mark everything
+        // that already finished as spoken so the current/next cue speaks.
+        val lastFinished = _uiState.value.parsedSubtitles.indexOfLast { it.endTimeMs < clamped - 150L }
         // pendingSeekMs bridges Compose state -> ExoPlayer.seekTo() in the surface view.
-        _uiState.update { it.copy(pendingSeekMs = clamped) }
+        _uiState.update { it.copy(pendingSeekMs = clamped, lastSpokenSubtitleIndex = lastFinished) }
         updateVideoPosition(clamped)
     }
 
@@ -1375,7 +1394,9 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
             _uiState.update { it.copy(videoDurationMs = exoDurationMs) }
         }
         if (!st.isVideoPlaying) return
-        if (kotlin.math.abs(exoPositionMs - st.videoPositionMs) > 500L) {
+        // Tight sync: the simulated clock can drift; keep the subtitle/voice
+        // trigger within ~120ms of the real player position.
+        if (kotlin.math.abs(exoPositionMs - st.videoPositionMs) > 120L) {
             updateVideoPosition(exoPositionMs.coerceAtLeast(0L))
         }
     }
@@ -1408,17 +1429,27 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
             it.copy(
                 isSameToSameTimeDelivery = enabled,
                 isFastSubtitleSpeechEnabled = enabled,
-                // 1:1 delivery means the voice starts exactly when the cue
-                // appears; disable the old 3s pre-roll.
-                dialogueLeadTimeMs = if (enabled) 0L else 3000L,
+                // 1:1 delivery starts exactly with the cue; normal story
+                // narration starts 2s before the subtitle appears.
+                dialogueLeadTimeMs = if (enabled) 0L else 2000L,
                 lastSpokenSubtitleIndex = -1
             )
         }
     }
 
     fun lockSameToSameSync() {
-        // Fast reset and calibration
-        _uiState.update { it.copy(soundTrackSyncDelayMs = 0L, subtitleOffsetMs = 0L) }
+        // Explicit 1:1 lock: zero offset and zero pre-roll so the voice starts
+        // on the exact subtitle timestamp.
+        _uiState.update {
+            it.copy(
+                soundTrackSyncDelayMs = 0L,
+                subtitleOffsetMs = 0L,
+                dialogueLeadTimeMs = 0L,
+                isSameToSameTimeDelivery = true,
+                isPerfectTimingEnabled = true,
+                lastSpokenSubtitleIndex = -1
+            )
+        }
     }
 
     // --- Subtitle Appearance & Dialogs ---
@@ -2171,7 +2202,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         _uiState.update { it.copy(showPerfectTimingDialog = show) }
     }
 
-    /** Voice pre-roll (0–5000ms). 3000ms = voice starts 3 sec before subtitle. */
+    /** Story pre-roll (0–5000ms). 2000ms = voice starts 2s before subtitle. */
     fun setDialogueLeadTimeMs(leadMs: Long) {
         _uiState.update { it.copy(dialogueLeadTimeMs = leadMs.coerceIn(0L, 5000L)) }
     }
@@ -2180,7 +2211,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
         _uiState.update {
             it.copy(
                 isPerfectTimingEnabled = enabled,
-                dialogueLeadTimeMs = if (enabled) 0L else it.dialogueLeadTimeMs
+                dialogueLeadTimeMs = if (enabled) 2000L else it.dialogueLeadTimeMs
             )
         }
     }
@@ -2194,7 +2225,7 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
             it.copy(
                 soundTrackSyncDelayMs = 0L,
                 subtitleOffsetMs = 0L,
-                dialogueLeadTimeMs = 0L,
+                dialogueLeadTimeMs = 2000L,
                 isPerfectTimingEnabled = true,
                 lastSpokenSubtitleIndex = -1
             )
@@ -2252,17 +2283,16 @@ class TtsViewModel(application: Application) : AndroidViewModel(application), Te
     }
 
     /**
-     * Per-cue speech rate. Speaking window = cue duration + 3-sec pre-roll.
-     * Hindi (Devanagari) lines speak at FULL speed (1.5x) so poora dialogue
-     * jaldi aur saaf samajh aaye; other languages use the normal fitted rate.
+     * Per-cue speech rate, fitted to the cue's own on-screen duration. Fitting
+     * to the cue (not cue + pre-roll) keeps the 2s story lead stable: each line
+     * finishes before the next subtitle starts, so the queue never drifts.
      */
     private fun rateForCue(cue: SrtItem, state: TtsUiState, speechText: String): Float {
         val base = speedForState(state)
         val fitted = if (!state.isDynamicRateAutoFitEnabled) {
             base
         } else {
-            val leadMs = state.dialogueLeadTimeMs.coerceIn(0L, 5000L)
-            val windowMs = (cue.endTimeMs - cue.startTimeMs + leadMs).coerceAtLeast(1500L)
+            val windowMs = (cue.endTimeMs - cue.startTimeMs).coerceAtLeast(1500L)
             val neededCps = speechText.length / (windowMs / 1000f)
             base * (neededCps / 14f).coerceIn(0.9f, 1.5f)
         }

@@ -139,7 +139,13 @@ fun PerfectDialogueTimingDialog(
                                         color = MaterialTheme.colorScheme.outline
                                     )
                                     Text(
-                                        text = if (isPerfectTiming) "Zero Delay Active (${leadTime}ms pre-roll)" else "Standard Timing (No pre-roll)",
+                                        text = if (!isPerfectTiming) {
+                                            "Standard Timing"
+                                        } else if (leadTime > 0L) {
+                                            "Story Narration (${leadTime}ms early)"
+                                        } else {
+                                            "1:1 Sync (0ms)"
+                                        },
                                         fontSize = 14.sp,
                                         fontWeight = FontWeight.ExtraBold,
                                         color = if (isPerfectTiming) Color(0xFF0086FF) else MaterialTheme.colorScheme.onSurface
@@ -242,8 +248,8 @@ fun PerfectDialogueTimingDialog(
                                 val presets = listOf(
                                     0L to "0ms (Same)",
                                     1000L to "1s",
-                                    2000L to "2s",
-                                    3000L to "3s (Default)",
+                                    2000L to "2s (Default)",
+                                    3000L to "3s",
                                     5000L to "5s"
                                 )
                                 presets.forEach { (ms, label) ->

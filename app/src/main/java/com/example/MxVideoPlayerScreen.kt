@@ -1153,7 +1153,7 @@ fun ExoPlayerSurfaceView(
     // ViewModel clock and actual playback, and picks up true duration.
     LaunchedEffect(exoPlayer) {
         while (isActive) {
-            delay(500L)
+            delay(250L)
             try {
                 val dur = exoPlayer.duration
                 if (dur > 0L) {
