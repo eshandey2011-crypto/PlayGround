@@ -3,11 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#070b16">
+  <meta name="theme-color" content="#1b1b1b">
   <title>SRT Video Player — Smart subtitles &amp; Hindi dubbing</title>
   <meta name="description" content="A cinematic video player with bilingual SRT subtitles, sync controls, offline Hindi text-to-speech and a beautiful local library.">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230066ff'/%3E%3Cpath d='M25 19l21 13-21 13z' fill='white'/%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%231e1e1e'/%3E%3Cpath d='M27 8h10l2 10H25z' fill='%23ff8800'/%3E%3Cpath d='M24.5 18h15l2 10h-19z' fill='%23fff'/%3E%3Cpath d='M22 28h20l2.5 12h-25z' fill='%23ff8800'/%3E%3Cpath d='M19 40h26l2 6H17z' fill='%23ff8800'/%3E%3Crect x='10' y='46' width='44' height='7' rx='3.5' fill='%23333'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="vlc.css">
 </head>
 <body>
 <div class="app-shell" id="app" data-ready="false">
@@ -53,16 +54,27 @@
     <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
     <symbol id="i-list" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1.2" fill="currentColor" stroke="none"/><circle cx="4.5" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="4.5" cy="18" r="1.2" fill="currentColor" stroke="none"/></symbol>
     <symbol id="i-speaker" viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5v14L7.5 14.5H4z"/><path d="M15.5 9a4 4 0 0 1 0 6"/></symbol>
+    <symbol id="i-cone" viewBox="0 0 24 24"><path d="M10.1 2.6h3.8l.7 3.7H9.4z" fill="currentColor" stroke="none"/><path d="M9.3 6.3h5.4l.7 3.7H8.6z" fill="#fff" stroke="none"/><path d="M8.4 10h7.2l.9 4.4H7.5z" fill="currentColor" stroke="none"/><path d="M7.3 14.4h9.4l.8 2.6H6.5z" fill="currentColor" stroke="none"/><rect x="4.4" y="17" width="15.2" height="2.4" rx="1.2" fill="currentColor" stroke="none"/></symbol>
   </svg>
 
   <header class="topbar">
     <a class="brand" href="#" id="brandHome" aria-label="SRT Video Player home">
-      <span class="brand-mark"><svg class="ico"><use href="#i-play"></use></svg></span>
+      <span class="brand-mark"><svg class="ico"><use href="#i-cone"></use></svg></span>
       <span class="brand-text">
         <strong data-i18n="appTitle">SRT Video Player</strong>
         <small data-i18n="tagline">Smart subtitles · Hindi dubbing</small>
       </span>
     </a>
+
+    <nav class="vlc-menu" aria-label="Player menu">
+      <button data-vlc-menu="local">Media</button>
+      <button data-vlc-menu="player">Playback</button>
+      <button data-vlc-menu="tts">Audio</button>
+      <button data-vlc-menu="style">Video</button>
+      <button data-vlc-menu="subs">Subtitle</button>
+      <button data-vlc-menu="sync">Tools</button>
+      <button data-vlc-menu="help">Help</button>
+    </nav>
 
     <nav class="desktop-nav" aria-label="Primary">
       <button class="nav-pill" data-screen="local">
@@ -190,7 +202,7 @@
             </button>
             <button class="quick" data-open="style">
               <span class="q-ico amber"><svg class="ico"><use href="#i-tune"></use></svg></span>
-              <span class="q-copy"><strong data-i18n="quickStyle">Appearance</strong><small id="styleSummary">Yellow · 30px</small></span>
+              <span class="q-copy"><strong data-i18n="quickStyle">Appearance</strong><small id="styleSummary">White · 30px</small></span>
             </button>
             <button class="quick" data-screen-jump="tts">
               <span class="q-ico green"><svg class="ico"><use href="#i-headphones"></use></svg></span>
@@ -250,19 +262,19 @@
                 <div class="control-block">
                   <div class="control-head"><span data-i18n="textColor">Text color</span></div>
                   <div class="swatches" id="swatches" role="group" aria-label="Subtitle text color">
-                    <button class="swatch is-active" data-color="#ffd600" style="--swatch:#ffd600" aria-label="Yellow"></button>
-                    <button class="swatch" data-color="#ffffff" style="--swatch:#ffffff" aria-label="White"></button>
+                    <button class="swatch" data-color="#ffd600" style="--swatch:#ffd600" aria-label="Yellow"></button>
+                    <button class="swatch is-active" data-color="#ffffff" style="--swatch:#ffffff" aria-label="White"></button>
                     <button class="swatch" data-color="#00e5ff" style="--swatch:#00e5ff" aria-label="Cyan"></button>
                     <button class="swatch" data-color="#ff9bd2" style="--swatch:#ff9bd2" aria-label="Pink"></button>
                   </div>
                 </div>
                 <div class="control-block">
-                  <div class="control-head"><span data-i18n="backdrop">Backdrop</span><output id="bgOpacityOut">55%</output></div>
-                  <input id="bgOpacity" class="range" type="range" min="0" max="90" step="5" value="55">
+                  <div class="control-head"><span data-i18n="backdrop">Backdrop</span><output id="bgOpacityOut">0%</output></div>
+                  <input id="bgOpacity" class="range" type="range" min="0" max="90" step="5" value="0">
                 </div>
                 <div class="control-block">
-                  <div class="control-head"><span data-i18n="position">Position</span><output id="positionOut">18%</output></div>
-                  <input id="position" class="range" type="range" min="4" max="46" step="1" value="18">
+                  <div class="control-head"><span data-i18n="position">Position</span><output id="positionOut">8%</output></div>
+                  <input id="position" class="range" type="range" min="4" max="46" step="1" value="8">
                 </div>
                 <div class="toggle-row">
                   <span><strong data-i18n="boldText">Bold text</strong><small data-i18n="boldTextSub">High-contrast subtitle weight</small></span>

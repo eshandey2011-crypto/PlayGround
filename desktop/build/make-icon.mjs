@@ -22,19 +22,28 @@ function insideRoundRect(x, y, size) {
   return (x - cx) ** 2 + (y - cy) ** 2 <= r * r
 }
 
-function insideTriangle(x, y, size) {
-  const ax = size * 0.335
-  const ay = size * 0.255
-  const bx = size * 0.335
-  const by = size * 0.745
-  const cx = size * 0.765
-  const cy = size * 0.5
-  const d1 = (x - bx) * (ay - by) - (ax - bx) * (y - by)
-  const d2 = (x - cx) * (by - cy) - (bx - cx) * (y - cy)
-  const d3 = (x - ax) * (cy - ay) - (cx - ax) * (y - ay)
-  const hasNeg = d1 < 0 || d2 < 0 || d3 < 0
-  const hasPos = d1 > 0 || d2 > 0 || d3 > 0
-  return !(hasNeg && hasPos)
+function coneBand(x, y, size) {
+  const nx = x / size
+  const ny = y / size
+  if (ny < 0.12 || ny > 0.8) return 0
+  const t = (ny - 0.12) / 0.68
+  const half = 0.085 + t * 0.19
+  if (Math.abs(nx - 0.5) > half) return 0
+  return ny >= 0.31 && ny <= 0.43 ? 2 : 1
+}
+
+function coneBase(x, y, size) {
+  const nx = x / size
+  const ny = y / size
+  const left = 0.155
+  const right = 0.845
+  const top = 0.775
+  const bottom = 0.875
+  const r = 0.028
+  if (nx < left || nx > right || ny < top || ny > bottom) return 0
+  const cx = Math.min(Math.max(nx, left + r), right - r)
+  const cy = Math.min(Math.max(ny, top + r), bottom - r)
+  return (nx - cx) ** 2 + (ny - cy) ** 2 <= r * r ? 1 : 0
 }
 
 function render(size) {
@@ -43,28 +52,38 @@ function render(size) {
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
       let bg = 0
-      let fg = 0
+      let base = 0
+      let orange = 0
+      let white = 0
+      let orangeT = 0
       for (let sy = 0; sy < SS; sy++) {
         for (let sx = 0; sx < SS; sx++) {
           const px = x + (sx + 0.5) * step
           const py = y + (sy + 0.5) * step
           if (!insideRoundRect(px, py, size)) continue
           bg++
-          if (insideTriangle(px, py, size)) fg++
+          if (coneBase(px, py, size)) { base++; continue }
+          const band = coneBand(px, py, size)
+          if (band === 2) white++
+          else if (band === 1) {
+            orange++
+            orangeT += clamp01((py / size - 0.12) / 0.68)
+          }
         }
       }
-      const total = SS * SS
-      const alpha = bg / total
-      const tri = bg ? fg / bg : 0
-      const t = clamp01(y / size)
-      const r = mix(mix(12, 0, t), 255, tri)
-      const g = mix(mix(126, 74, t), 255, tri)
-      const b = mix(mix(255, 214, t), 255, tri)
+      const dark = Math.max(0, bg - base - orange - white)
+      const t = orange ? orangeT / orange : 0.5
+      const rr = mix(255, 240, t)
+      const gg = mix(164, 116, t)
+      const bb = mix(38, 0, t)
+      const r = (dark * 30 + base * 52 + white * 255 + orange * rr) / (bg || 1)
+      const g = (dark * 30 + base * 52 + white * 255 + orange * gg) / (bg || 1)
+      const b = (dark * 30 + base * 52 + white * 255 + orange * bb) / (bg || 1)
       const i = (y * size + x) * 4
       pixels[i] = Math.round(r)
       pixels[i + 1] = Math.round(g)
       pixels[i + 2] = Math.round(b)
-      pixels[i + 3] = Math.round(alpha * 255)
+      pixels[i + 3] = Math.round((bg / (SS * SS)) * 255)
     }
   }
   return pixels

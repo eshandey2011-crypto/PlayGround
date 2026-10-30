@@ -72,9 +72,52 @@ app.whenReady().then(async () => {
   })()`)
   const image = await win.webContents.capturePage()
   writeFileSync(path.join(outDir, 'smoke.png'), image.toPNG())
+  const menu = await win.webContents.executeJavaScript(`(async () => {
+    const click = (name) => document.querySelector('[data-vlc-menu="' + name + '"]').click()
+    const active = (id) => document.getElementById(id).classList.contains('is-active')
+    const wait = () => new Promise((resolve) => setTimeout(resolve, 120))
+    const result = {}
+    click('local'); await wait(); result.media = active('screen-local')
+    click('tts'); await wait(); result.audio = active('screen-tts')
+    click('style'); result.video = active('screen-player') && document.querySelector('[data-pane="style"]').classList.contains('is-active')
+    click('subs'); result.subtitle = document.querySelector('[data-pane="subs"]').classList.contains('is-active')
+    click('sync'); result.tools = document.getElementById('syncDialog').open; document.getElementById('syncDialog').close()
+    click('help'); result.help = document.getElementById('helpDialog').open; document.getElementById('helpDialog').close()
+    click('player'); result.playback = active('screen-player')
+    return result
+  })()`)
+  await win.webContents.executeJavaScript(`document.querySelector('[data-vlc-menu="local"]').click()`)
+  await new Promise((resolve) => setTimeout(resolve, 250))
+  writeFileSync(path.join(outDir, 'smoke-local.png'), (await win.webContents.capturePage()).toPNG())
+  await win.webContents.executeJavaScript(`document.querySelector('[data-vlc-menu="tts"]').click()`)
+  await new Promise((resolve) => setTimeout(resolve, 250))
+  writeFileSync(path.join(outDir, 'smoke-tts.png'), (await win.webContents.capturePage()).toPNG())
+  await win.webContents.executeJavaScript(`document.querySelector('[data-vlc-menu="player"]').click()`)
+  await win.webContents.executeJavaScript(`document.querySelector('[data-vlc-menu="help"]').click()`)
+  await new Promise((resolve) => setTimeout(resolve, 250))
+  writeFileSync(path.join(outDir, 'smoke-help.png'), (await win.webContents.capturePage()).toPNG())
+  await win.webContents.executeJavaScript(`document.getElementById('helpDialog').close()`)
+  win.setSize(430, 860)
+  await new Promise((resolve) => setTimeout(resolve, 400))
+  await win.webContents.executeJavaScript(`document.querySelector('[data-vlc-menu="local"]')?.click() || document.querySelector('.mobile-nav [data-go="local"]')?.click()`)
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  writeFileSync(path.join(outDir, 'smoke-mobile-local.png'), (await win.webContents.capturePage()).toPNG())
+  const mobile = await win.webContents.executeJavaScript(`(() => {
+    const menu = document.querySelector('.vlc-menu')
+    const nav = document.querySelector('.mobile-nav')
+    return {
+      menuHidden: menu ? getComputedStyle(menu).display === 'none' : true,
+      navVisible: nav ? getComputedStyle(nav).display !== 'none' : false,
+      overflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth
+    }
+  })()`)
+  win.setSize(1440, 900)
+  await new Promise((resolve) => setTimeout(resolve, 300))
   const dropOk = drop.overlayVisible && drop.draggingCleared && drop.cueCount === '2' && drop.trackFile === 'drop-test.srt'
+  const menuOk = Object.values(menu).every(Boolean)
+  const mobileOk = mobile.menuHidden && mobile.navVisible && mobile.overflowX <= 0
   const imageOk = image.getSize().width >= 1400 && image.getSize().height >= 800
-  const ok = state.ready && state.screen === 'screen-player' && state.bodyChars > 500 && imageOk && dropOk
-  console.log(JSON.stringify({ ...state, drop, image: image.getSize(), dropOk, imageOk, ok, consoleErrors: errors }, null, 2))
+  const ok = state.ready && state.screen === 'screen-player' && state.bodyChars > 500 && imageOk && dropOk && menuOk && mobileOk
+  console.log(JSON.stringify({ ...state, drop, menu, mobile, image: image.getSize(), dropOk, menuOk, mobileOk, imageOk, ok, consoleErrors: errors }, null, 2))
   app.exit(ok ? 0 : 1)
 })

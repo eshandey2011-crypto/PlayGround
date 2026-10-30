@@ -46,7 +46,7 @@
     }
   }
 
-  const STORE = 'srt-player-web-v1'
+  const STORE = 'srt-player-web-v2'
   const settings = loadSettings()
   let currentKey = settings.track && TRACKS[settings.track] ? settings.track : 'dawn'
   let track = TRACKS[currentKey]
@@ -180,7 +180,7 @@
 
   function applyStyle(style) {
     settings.style = Object.assign({
-      size: 30, color: '#ffd600', bg: 55, bottom: 18, bold: true, outline: true
+      size: 30, color: '#ffffff', bg: 0, bottom: 8, bold: true, outline: true
     }, settings.style || {}, style || {})
     const s = settings.style
     root.style.setProperty('--sub-size', `${s.size}px`)
@@ -727,6 +727,17 @@
     $('langToggle').addEventListener('click', () => { uiLang = uiLang === 'hi' ? 'en' : 'hi'; applyLanguage(); saveSettings() })
     $('helpBtn').addEventListener('click', () => $('helpDialog').showModal())
     $('brandHome').addEventListener('click', e => { e.preventDefault(); showScreen('player') })
+    document.querySelectorAll('[data-vlc-menu]').forEach(btn => btn.addEventListener('click', () => {
+      const action = btn.dataset.vlcMenu
+      if (action === 'sync') { $('syncDialog').showModal(); return }
+      if (action === 'help') { $('helpDialog').showModal(); return }
+      if (action === 'subs' || action === 'style' || action === 'voice') {
+        showScreen('player')
+        setSidePanel(action)
+        return
+      }
+      showScreen(action)
+    }))
 
     document.querySelectorAll('[data-screen]').forEach(btn => btn.addEventListener('click', () => showScreen(btn.dataset.screen)))
     document.querySelectorAll('[data-screen-jump]').forEach(btn => btn.addEventListener('click', () => showScreen(btn.dataset.screenJump)))
@@ -956,7 +967,7 @@
   }
 
   function init() {
-    const savedTheme = settings.theme === 'light' ? 'light' : 'dark'
+    const savedTheme = 'dark'
     root.dataset.theme = savedTheme
     setTheme(savedTheme)
     applyLanguage()

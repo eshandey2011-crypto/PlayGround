@@ -24,6 +24,7 @@ The SRT Video Player is also packaged as a portable Windows executable:
 - Download: [`release/SRT-Video-Player-1.0.0-win-x64.exe`](release/SRT-Video-Player-1.0.0-win-x64.exe)
 - Windows 10/11, 64-bit. No installer needed - double-click to run.
 - Drag a video and an SRT/VTT file onto the window to load both at once.
+- VLC-style interface: dark charcoal chrome, orange accents, and Media / Playback / Audio / Video / Subtitle / Tools / Help menus.
 - The build is unsigned, so Windows SmartScreen may ask you to confirm the first launch.
 
 Rebuild the executable on any platform with Node.js 20+:
